@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_final_production_v2")
+st_autorefresh(interval=60000, key="nifty_final_production_v3")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DATASET A: ACTIVE & RECENT EVENTS (PAST 7 DAYS)
@@ -44,7 +44,7 @@ def get_clean_table(data_list):
         return f'color: {color}; font-weight: bold;'
     return df.style.map(style_impact_text, subset=['Impact Level'])
 
-# 5. UI LAYOUT
+# 5. MAIN UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 
 # NET SENTIMENT SCORE & GAUGE
@@ -77,34 +77,35 @@ with col2:
     st.write("**31 - 45 (Stress):** Major volatility; expect 300+ point gaps.")
     st.write("**46 - 50 (Black Swan):** Extreme risk; potential circuit breakers.")
 
-# --- SIDEBAR: LIVE INDEX & FULL REFERENCE ---
+# --- SIDEBAR: REORGANIZED LAYOUT ---
+# TOP: Alert
+st.sidebar.error("📍 **Bengaluru Weekend Alert:**")
+st.sidebar.write("The **US Fed meeting** (end of April) is a **9/10 weight**. This will be the biggest driver for FII flows into Indian tech stocks in May.")
+st.sidebar.markdown("---")
+
+# MIDDLE: Live Index
 st.sidebar.header("NSE: NIFTY 50")
 nifty_ticker = yf.Ticker("^NSEI")
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     current_price = nifty_hist['Close'].iloc[-1]
-    opening_price = nifty_hist['Open'].iloc[0] # Stability fix
+    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc[0] for stability
     price_change = current_price - opening_price
     st.sidebar.metric("Live Index", f"{current_price:,.2f}", f"{price_change:+.2f}")
+    st.sidebar.write(f"IST Update: {datetime.now(IST).strftime('%H:%M:%S')}")
 else:
     st.sidebar.warning("Market Closed (Good Friday Holiday)")
-
 st.sidebar.markdown("---")
+
+# BOTTOM: Weight Reference
 st.sidebar.subheader("⚖️ Weight & Sentiment Guide")
-
-# Detailed Weight Reference
-st.sidebar.markdown("**Individual Item Weights:**")
+st.sidebar.markdown("**Weights (1-10):**")
 st.sidebar.write("• **9-10/10:** 'Market Changers'. Expect 300+ point gaps.")
-st.sidebar.write("• **6-8/10:** 'Trend Setters'. 100-200 point intraday moves.")
-st.sidebar.write("• **Under 5/10:** 'Daily Volatility'. Affects specific stocks.")
+st.sidebar.write("• **6-8/10:** 'Trend Setters'. 100-200 point moves.")
+st.sidebar.write("• **Under 5/10:** 'Daily Volatility'.")
 
-# Detailed Sentiment Score Reference
-st.sidebar.markdown("**Net Sentiment Score (Total):**")
-st.sidebar.write("• **31-50:** 'High Stress/Crash/Rally' zone.")
+st.sidebar.markdown("**Net Sentiment (Total):**")
+st.sidebar.write("• **31-50:** 'High Stress' zone.")
 st.sidebar.write("• **16-30:** 'Active Trend' zone.")
-st.sidebar.write("• **0-15:** 'Sideways/Stable' zone.")
-
-st.sidebar.markdown("---")
-st.sidebar.error("📍 **Bengaluru Alert:**")
-st.sidebar.write("Note that the **US Fed meeting** (end of April) is a **9/10 weight**. This will be the biggest driver for FII flows into Indian tech stocks in May.")
+st.sidebar.write("• **0-15:** 'Sideways' zone.")
