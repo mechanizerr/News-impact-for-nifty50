@@ -106,23 +106,138 @@ IRRELEVANT_KEYWORDS = [
     'recipe', 'fashion', 'lifestyle', 'horoscope', 'sports score'
 ]
 
+def build_specific_logic(title: str) -> str:
+    """Generate a specific logic sentence by reading key entities from the headline."""
+    t = title.lower()
+
+    # Named stock matches → mention them directly
+    stock_map = {
+        'tcs': 'TCS', 'infosys': 'Infosys', 'infy': 'Infosys',
+        'hdfcbank': 'HDFCBANK', 'hdfc bank': 'HDFCBANK',
+        'icicibank': 'ICICIBANK', 'icici bank': 'ICICIBANK',
+        'reliance': 'Reliance', 'sbi': 'SBI', 'itc': 'ITC',
+        'wipro': 'Wipro', 'hcltech': 'HCLTech', 'hcl tech': 'HCLTech',
+        'axisbank': 'AxisBank', 'axis bank': 'AxisBank',
+        'kotakbank': 'Kotak', 'kotak bank': 'Kotak',
+        'bajaj finance': 'BajajFinance', 'bajajfinance': 'BajajFinance',
+        'maruti': 'Maruti', 'tatamotors': 'TataMotors', 'tata motors': 'TataMotors',
+        'tatasteel': 'TataSteel', 'tata steel': 'TataSteel',
+        'jswsteel': 'JSW Steel', 'jsw steel': 'JSW Steel',
+        'hindalco': 'Hindalco', 'ongc': 'ONGC', 'ntpc': 'NTPC',
+        'powergrid': 'PowerGrid', 'bpcl': 'BPCL', 'coalindia': 'CoalIndia',
+        'sunpharma': 'SunPharma', 'sun pharma': 'SunPharma',
+        'drreddy': "Dr Reddy's", "dr reddy": "Dr Reddy's",
+        'cipla': 'Cipla', 'adani': 'Adani group', 'titan': 'Titan',
+        'indigo': 'IndiGo', 'spicejet': 'SpiceJet',
+    }
+    matched_stocks = [v for k, v in stock_map.items() if k in t]
+    stock_str = ", ".join(matched_stocks[:2]) if matched_stocks else ""
+
+    # Sector detection
+    sector = ""
+    if any(k in t for k in ['bank', 'nbfc', 'lending', 'credit', 'rbl', 'emirates nbd']):
+        sector = "banking stocks"
+    elif any(k in t for k in ['it ', 'software', 'tech', 'infosys', 'tcs', 'wipro', 'hcl']):
+        sector = "IT sector"
+    elif any(k in t for k in ['pharma', 'drug', 'medicine', 'sunpharma', 'cipla', 'drreddy']):
+        sector = "pharma stocks"
+    elif any(k in t for k in ['oil', 'crude', 'brent', 'petroleum', 'ongc', 'bpcl']):
+        sector = "oil & gas stocks"
+    elif any(k in t for k in ['steel', 'metal', 'aluminium', 'hindalco', 'tatasteel', 'jsw']):
+        sector = "metals sector"
+    elif any(k in t for k in ['auto', 'vehicle', 'ev ', 'electric vehicle', 'maruti', 'tatamotors']):
+        sector = "auto stocks"
+    elif any(k in t for k in ['gold', 'silver', 'commodity', 'comex']):
+        sector = "commodity-linked stocks"
+    elif any(k in t for k in ['aviation', 'airline', 'indigo', 'spicejet']):
+        sector = "aviation stocks"
+    elif any(k in t for k in ['fmcg', 'itc', 'nestle', 'britannia', 'dabur']):
+        sector = "FMCG stocks"
+    elif any(k in t for k in ['power', 'energy', 'renewable', 'solar', 'ntpc', 'powergrid']):
+        sector = "power sector"
+
+    target = stock_str or sector or "Nifty heavyweights"
+
+    # Mechanism detection → build specific sentence
+    # Priority order matters — most specific checks first
+    if any(k in t for k in ['rate cut', 'repo cut', 'rate reduction', 'accommodative']):
+        return f"Rate cut boosts {target}; lower borrowing costs lift index sentiment."
+    if any(k in t for k in ['rate hike', 'hawkish', 'tightening', 'rate increase']):
+        return f"Rate hike pressures {target}; higher borrowing costs compress valuations."
+    if any(k in t for k in ['rbi', 'mpc', 'monetary policy', 'repo rate']):
+        return f"RBI policy signals affect {target}; market re-prices rate trajectory."
+    if any(k in t for k in ['fed', 'federal reserve', 'fomc', 'powell']):
+        return f"Fed stance drives FII flows; {target} react to dollar/yield movement."
+    if any(k in t for k in ['gold', 'silver', 'comex']):
+        return f"Precious metal surge signals safe-haven demand; equity rotation out of {target} likely."
+    if any(k in t for k in ['dow jones', 'dow futures', 'nasdaq', 's&p 500', 'wall street', 'us stocks', 'us stock market']):
+        return f"US market fall triggers overnight FII selling; {target} expected to gap down at NSE open."
+    if 'iran' in t and any(k in t for k in ['war', 'conflict', 'strike', 'tension', 'shock', 'escalat']):
+        return f"Iran conflict spikes crude oil; BPCL, ONGC gain but aviation and {target} face cost pressure."
+    if any(k in t for k in ['crude', 'oil price', 'brent', 'wti', 'petroleum']):
+        return f"Crude move hits India import bill; {target} reprice on fuel cost and inflation impact."
+    if any(k in t for k in ['tariff', 'trade war']):
+        return f"US tariffs raise global risk-off; FIIs exit emerging markets, {target} under pressure."
+    if 'trump' in t and any(k in t for k in ['market', 'stock', 'economy', 'fed', 'rate', 'china', 'india']):
+        return f"Trump policy uncertainty drives FII caution; {target} vulnerable to sentiment selloff."
+    if any(k in t for k in ['sanctions', 'geopolit', 'middle east', 'war', 'conflict', 'missile', 'strike']):
+        return f"Geopolitical risk triggers FII exit from EM; {target} under broad selling pressure."
+    if any(k in t for k in ['rupee', 'inr', 'forex', 'dollar', 'currency']):
+        return f"Rupee move affects {target}; IT exporters gain on weak INR, importers lose margin."
+    if any(k in t for k in ['fii', 'fpi', 'foreign investor', 'foreign fund']):
+        return f"FII flow shift directly moves {target} and sets overall Nifty direction."
+    if any(k in t for k in ['inflation', 'cpi', 'wpi', 'price rise']):
+        return f"Inflation data shifts RBI rate expectations; {target} reprice on policy outlook."
+    if any(k in t for k in ['gdp', 'economic growth', 'iip']):
+        return f"GDP/IIP data resets earnings expectations; {target} valuations re-rated."
+    if any(k in t for k in ['earnings', 'results', 'profit', 'revenue', 'q4', 'q3', 'quarterly']):
+        return f"{target} earnings beat/miss sets sector tone and near-term index direction."
+    if any(k in t for k in ['ipo', 'listing', 'nse listing']):
+        return f"{target} IPO draws liquidity from secondary market; Nifty sentiment impact moderate."
+    if any(k in t for k in ['acquisition', 'merger', 'takeover', 'buyout', 'stake']):
+        return f"{target} deal re-rates the sector; index weight and institutional flows shift."
+    if any(k in t for k in ['sebi', 'regulation', 'compliance', 'circular']):
+        return f"SEBI action on {target} affects market confidence and institutional flows."
+    if any(k in t for k in ['market cap', 'global cap', 'index share']):
+        return f"India market-cap decline signals FII repositioning; {target} most exposed."
+    if any(k in t for k in ['china', 'pakistan', 'border', 'lac']):
+        return f"India-{('China' if 'china' in t else 'Pakistan')} tension raises risk premium; {target} face FII caution."
+
+    # Generic but at least mentions the target
+    return f"{target} directly affected; watch for index-level moves at open."
+
+
 def keyword_fallback(headlines: tuple) -> list:
     results = []
     for i, title in enumerate(headlines):
         t = title.lower()
+
+        # Filter irrelevant
         if any(k in t for k in IRRELEVANT_KEYWORDS):
-            results.append({"index": i+1, "relevant": False, "impact_level": "🟡 Moderate", "weight": 2, "logic": "Not market relevant."})
+            results.append({"index": i+1, "relevant": False,
+                            "impact_level": "🟡 Moderate", "weight": 2,
+                            "logic": "Not market relevant."})
             continue
+
+        # Classify and build specific logic
+        logic = build_specific_logic(title)
+
         if any(k in t for k in CRISIS_KEYWORDS):
-            results.append({"index": i+1, "relevant": True, "impact_level": "🔴 Critical", "weight": 9, "logic": "Geopolitical/macro crisis — FII selling pressure, broad index decline expected."})
+            results.append({"index": i+1, "relevant": True,
+                            "impact_level": "🔴 Critical", "weight": 9, "logic": logic})
         elif any(k in t for k in MACRO_KEYWORDS):
-            results.append({"index": i+1, "relevant": True, "impact_level": "🟠 High", "weight": 7, "logic": "Macro policy shift — affects liquidity, FII flows, and rate-sensitive Nifty stocks."})
+            results.append({"index": i+1, "relevant": True,
+                            "impact_level": "🟠 High", "weight": 7, "logic": logic})
         elif any(s in t for s in NIFTY_50_STOCKS) or any(k in t for k in ['nifty', 'sensex', 'nse', 'bse']):
-            results.append({"index": i+1, "relevant": True, "impact_level": "🟡 Moderate", "weight": 6, "logic": "Nifty 50 constituent event — sector-level impact on index weight."})
+            results.append({"index": i+1, "relevant": True,
+                            "impact_level": "🟡 Moderate", "weight": 6, "logic": logic})
         elif 'india' in t and any(k in t for k in ['market', 'stock', 'equity', 'index']):
-            results.append({"index": i+1, "relevant": True, "impact_level": "🟡 Moderate", "weight": 5, "logic": "Indian equity market event — moderate index-level impact."})
+            results.append({"index": i+1, "relevant": True,
+                            "impact_level": "🟡 Moderate", "weight": 5, "logic": logic})
         else:
-            results.append({"index": i+1, "relevant": False, "impact_level": "🟡 Moderate", "weight": 2, "logic": "Low relevance to Nifty 50."})
+            results.append({"index": i+1, "relevant": False,
+                            "impact_level": "🟡 Moderate", "weight": 2,
+                            "logic": "Low relevance to Nifty 50."})
     return results
 
 # ─── 4. SMART DEDUPLICATION ───────────────────────────────────────────────────
