@@ -4,47 +4,30 @@ import feedparser
 import yfinance as yf
 from datetime import datetime
 import pytz
+from streamlit_autorefresh import st_autorefresh
 
 # 1. TIMEZONE & CONFIG
 IST = pytz.timezone('Asia/Kolkata')
 st.set_page_config(page_title="Nifty 50 Pro Monitor", layout="wide")
+st_autorefresh(interval=60000, key="nifty_refresh")
 
-# 2. THE MASTER KEYWORD LIBRARY (Historical & Government Triggers)
-# These keywords are derived from historical Nifty 50 milestones
+# 2. MASTER KEYWORDS
 KEYWORDS = {
-    "CRITICAL": [
-        'covid', 'lockdown', 'pandemic', 'virus', 'variant', 'quarantine', # Health crises
-        'war', 'missile', 'attack', 'surgical strike', 'invasion', 'sanctions', # Geopolitical
-        'demonetization', 'scam', 'default', 'bankruptcy', 'crash', 'plunge' # Financial shocks
-    ],
-    "GOVERNMENT_POLICY": [
-        'rbi', 'repo rate', 'monetary policy', 'fiscal deficit', 'gst', 'budget', # Macro
-        'nirmala sitharaman', 'modi', 'cabinet', 'disinvestment', 'privatization', # Political
-        'excise duty', 'tariff', 'customs', 'subsidy', 'fdi', 'regulation', 'sebi' # Regulatory
-    ],
-    "CORPORATE_ACTIONS": [
-        'dividend', 'bonus', 'stock split', 'rights issue', 'buyback', 'merger', # Stock-specific
-        'acquisition', 'earnings', 'q4', 'q3', 'loss', 'profit', 'layoff', 'tcs', 'reliance' # Company
-    ],
-    "GLOBAL_MACRO": [
-        'fed', 'inflation', 'cpi', 'gdp', 'brent crude', 'oil price', 'dollar', 'fii', 'dii' # External
-    ]
+    "CRITICAL": ['covid', 'lockdown', 'pandemic', 'virus', 'variant', 'war', 'missile', 'attack', 'scam', 'crash'],
+    "GOVERNMENT": ['rbi', 'repo rate', 'gst', 'budget', 'nirmala sitharaman', 'modi', 'fdi', 'regulation', 'sebi', 'tariff'],
+    "CORPORATE": ['dividend', 'bonus', 'earnings', 'q4', 'q3', 'profit', 'loss', 'tcs', 'reliance', 'hdfc'],
+    "GLOBAL": ['fed', 'inflation', 'cpi', 'gdp', 'brent crude', 'oil price', 'fii', 'dii']
 }
 
-# 3. CORE LOGIC: Dynamic Impact Scorer
 def analyze_impact(title):
     title = title.lower()
-    if any(k in title for k in KEYWORDS["CRITICAL"]):
-        return "🔴 Critical Impact"
-    if any(k in title for k in KEYWORDS["GOVERNMENT_POLICY"]):
-        return "🟠 High (Govt Policy)"
-    if any(k in title for k in KEYWORDS["CORPORATE_ACTIONS"]):
-        return "🟡 Medium (Corporate)"
-    if any(k in title for k in KEYWORDS["GLOBAL_MACRO"]):
-        return "🔵 High (Global Macro)"
+    if any(k in title for k in KEYWORDS["CRITICAL"]): return "🔴 Critical Impact"
+    if any(k in title for k in KEYWORDS["GOVERNMENT"]): return "🟠 High (Govt Policy)"
+    if any(k in title for k in KEYWORDS["CORPORATE"]): return "🟡 Medium (Corporate)"
+    if any(k in title for k in KEYWORDS["GLOBAL"]): return "🔵 High (Global Macro)"
     return "⚪ Low/Neutral"
 
-# 4. DATA FETCHING (Aggregated Sources)
+# 3. DATA FETCHING
 def get_nifty_feeds():
     sources = {
         "Moneycontrol": "https://moneycontrol.com",
@@ -55,26 +38,24 @@ def get_nifty_feeds():
     for name, url in sources.items():
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:6]:
+            for entry in feed.entries[:5]:
                 news_data.append({
                     "Source": name,
                     "Headline": entry.title,
-                    "Impact Category": analyze_impact(entry.title),
+                    "Impact": analyze_impact(entry.title),
                     "Time (IST)": datetime.now(IST).strftime("%H:%M:%S")
                 })
         except: continue
     return pd.DataFrame(news_data)
 
-# 5. UI COMPONENTS
+# 4. UI RENDER
 st.title("🏛️ Nifty 50 Pro: Policy & Impact Monitor")
 st.write(f"📍 Monitoring Active from **Bengaluru** | Last Sync: {datetime.now(IST).strftime('%I:%M %p')}")
 
-# Refresh Layout
-col_btn, col_empty = st.columns([1, 4])
-if col_btn.button("🔄 Force Refresh Feed"):
+if st.button("🔄 Force Refresh Feed"):
     st.rerun()
 
-# --- TABLE 1: Active News Feed ---
+# TABLE 1: Real-Time News
 st.subheader("🔴 Real-Time Impact Feed")
 df_news = get_nifty_feeds()
 if not df_news.empty:
@@ -83,7 +64,7 @@ if not df_news.empty:
         'background-color: #ffe0b3' if 'Govt' in v else '' for v in x
     ], axis=1), use_container_width=True)
 
-# --- TABLE 2: Future & Scheduled Events ---
+# TABLE 2: Future Events
 st.markdown("---")
 st.subheader("📅 Major Future Events (Scheduled)")
 future_events = [
@@ -94,11 +75,15 @@ future_events = [
 ]
 st.table(pd.DataFrame(future_events))
 
-# --- SIDEBAR: LIVE INDEX ---
+# SIDEBAR: LIVE INDEX (FIXED)
 st.sidebar.header("NSE: NIFTY 50")
-nifty = yf.Ticker("^NSEI").history(period="1d", interval="1m")
-if not nifty.empty:
-    price = nifty['Close'].iloc[-1]
-    change = price - nifty['Open'].iloc
+nifty_ticker = yf.Ticker("^NSEI")
+nifty_hist = nifty_ticker.history(period="1d", interval="1m")
+
+if not nifty_hist.empty:
+    price = nifty_hist['Close'].iloc[-1]
+    # FIXED: Added .iloc[0] to the opening price to resolve the TypeError
+    change = price - nifty_hist['Open'].iloc[0] 
     st.sidebar.metric("Live Price", f"{price:,.2f}", f"{change:+.2f}")
-st.sidebar.markdown("**Keywords Monitor:** Active for 150+ Market Triggers")
+else:
+    st.sidebar.warning("Market is Closed or Fetching Data...")
