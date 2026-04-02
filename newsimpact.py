@@ -8,10 +8,10 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_master_final_v5")
+st_autorefresh(interval=60000, key="nifty_master_7day_v1")
 IST = pytz.timezone('Asia/Kolkata')
 
-# 2. DYNAMIC LOGIC ENGINE (Assigns Weights & Logic based on Keywords)
+# 2. DYNAMIC LOGIC ENGINE
 def analyze_headline(title):
     t = title.lower()
     if any(k in t for k in ['trump', 'iran', 'war', 'strike', 'missile', 'lockdown', 'covid']):
@@ -24,29 +24,36 @@ def analyze_headline(title):
         return "🟡 Moderate", 5, "Institutional flow or industrial data sentiment."
     return "⚪ Low", 2, "General market news with minor index impact."
 
-# 3. DYNAMIC DATA FETCHING (Past 7 Days Aggregator)
-def fetch_dynamic_active_events():
+# 3. DYNAMIC DATA FETCHING (PAST 1 WEEK AGGREGATOR)
+def fetch_weekly_active_events():
     sources = [
         "https://moneycontrol.com",
         "https://livemint.com",
         "https://indiatimes.com"
     ]
     news_list = []
-    week_ago = datetime.now(IST) - timedelta(days=7)
+    # LOOKBACK: Exactly 7 days from now
+    lookback_date = datetime.now(IST) - timedelta(days=7)
     
     for url in sources:
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries:
+                # Parse published time
                 pub_time = datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IST)
-                if pub_time > week_ago:
+                
+                if pub_time > lookback_date:
                     impact, weight, logic = analyze_headline(entry.title)
                     news_list.append([entry.title, pub_time.strftime("%d %b, %I:%M %p"), impact, weight, logic])
         except: continue
-    return news_list
+    
+    # Remove duplicates based on headline
+    df_temp = pd.DataFrame(news_list, columns=["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact"])
+    df_temp = df_temp.drop_duplicates(subset=['Topic'])
+    return df_temp.values.tolist()
 
 # 4. DATASETS
-ACTIVE_EVENTS_DATA = fetch_dynamic_active_events()
+ACTIVE_EVENTS_DATA = fetch_weekly_active_events()
 
 FUTURE_EVENTS_DATA = [
     ["Good Friday Holiday", "April 3, 2026", "No Impact", 0, "Markets Closed; No Trading today."],
@@ -69,20 +76,20 @@ def get_clean_table(data_list):
 # 6. UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 
-# Sentiment Gauge
+# Sentiment Gauge (Calculated from today's triggers in the weekly list)
 today_str = datetime.now(IST).strftime("%d %b")
 today_score = sum([row[3] for row in ACTIVE_EVENTS_DATA if today_str in row[1]])
 gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
 st.subheader(f"Current Market Intensity: :{gauge_color}[{today_score} / 50]")
 st.progress(min(today_score / 50, 1.0))
 
-st.info(f"📍 Bengaluru Hub | Last Refresh: {datetime.now(IST).strftime('%d %b, %I:%M:%S %p')}")
+st.info(f"📍 Bengaluru Hub | Monitoring Window: Last 7 Days | Sync: {datetime.now(IST).strftime('%I:%M %p')}")
 
 if st.button("🔄 Force Refresh Feed Now"):
     st.rerun()
 
-# --- TABLE 1: ACTIVE EVENTS ---
-st.header("🔴 Active & Recent Events (Sorted by Priority)")
+# --- TABLE 1: ACTIVE EVENTS (PAST 7 DAYS) ---
+st.header("🔴 Active & Recent Events (Past 7 Days)")
 st.table(get_clean_table(ACTIVE_EVENTS_DATA))
 
 # --- TABLE 2: FUTURE EVENTS ---
@@ -95,15 +102,15 @@ st.markdown("---")
 st.header("📖 How to Read Net Sentiment")
 col1, col2 = st.columns(2)
 with col1:
-    st.write("**0 - 15 (Low):** Sideways market; narrow price range.")
-    st.write("**16 - 30 (Active):** Clear trend forming; 100-200 point intraday moves.")
+    st.write("**0 - 15 (Low):** Sideways market; stable conditions.")
+    st.write("**16 - 30 (Active):** Clear trend; 100-200 point intraday moves.")
 with col2:
     st.write("**31 - 45 (Stress):** Major volatility; expect 300+ point gaps.")
-    st.write("**46 - 50 (Black Swan):** Extreme risk; potential circuit breakers.")
+    st.write("**46 - 50 (Black Swan):** Extreme risk; circuit breaker potential.")
 
 # --- SIDEBAR REORGANIZED ---
 st.sidebar.error("📍 **Bengaluru Weekend Alert:**")
-st.sidebar.write("The **US Fed meeting** (end of April) is a **9/10 weight**. This will be the biggest driver for FII flows into Indian tech stocks in May.")
+st.sidebar.write("The **US Fed meeting** (end of April) is a **9/10 weight**. Major driver for FII flows into IT.")
 st.sidebar.markdown("---")
 
 st.sidebar.header("NSE: NIFTY 50")
@@ -111,8 +118,7 @@ nifty_ticker = yf.Ticker("^NSEI")
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 if not nifty_hist.empty:
     current_p = nifty_hist['Close'].iloc[-1]
-    # FIXED: Added [0] to select the first opening price value of the day
-    opening_p = nifty_hist['Open'].iloc[0] 
+    opening_p = nifty_hist['Open'].iloc[0] # FIXED INDEXING
     change = current_p - opening_p
     st.sidebar.metric("Live Index", f"{current_p:,.2f}", f"{change:+.2f}")
 else:
@@ -124,7 +130,6 @@ st.sidebar.markdown("**Weights (1-10):**")
 st.sidebar.write("• **9-10/10:** 'Market Changers'. Expect 300+ point gaps.")
 st.sidebar.write("• **6-8/10:** 'Trend Setters'. 100-200 point moves.")
 st.sidebar.write("• **Under 5/10:** 'Daily Volatility'.")
-
 st.sidebar.markdown("**Net Sentiment (Total):**")
 st.sidebar.write("• **31-50:** 'High Stress' zone.")
 st.sidebar.write("• **16-30:** 'Active Trend' zone.")
