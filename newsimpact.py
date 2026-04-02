@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_final_production")
+st_autorefresh(interval=60000, key="nifty_final_production_v2")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DATASET A: ACTIVE & RECENT EVENTS (PAST 7 DAYS)
@@ -48,8 +48,7 @@ def get_clean_table(data_list):
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 
 # NET SENTIMENT SCORE & GAUGE
-# Sum of weights for today's active triggers (02-Apr)
-today_score = sum([row[3] for row in ACTIVE_EVENTS_DATA if "02-Apr" in row])
+today_score = sum([row[3] for row in ACTIVE_EVENTS_DATA if "02-Apr" in row[1]])
 
 # Dynamic Gauge Color
 gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
@@ -78,23 +77,33 @@ with col2:
     st.write("**31 - 45 (Stress):** Major volatility; expect 300+ point gaps.")
     st.write("**46 - 50 (Black Swan):** Extreme risk; potential circuit breakers.")
 
-# --- SIDEBAR: LIVE INDEX & REFERENCE ---
+# --- SIDEBAR: LIVE INDEX & FULL REFERENCE ---
 st.sidebar.header("NSE: NIFTY 50")
 nifty_ticker = yf.Ticker("^NSEI")
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     current_price = nifty_hist['Close'].iloc[-1]
-    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc[0] for stability
+    opening_price = nifty_hist['Open'].iloc[0] # Stability fix
     price_change = current_price - opening_price
     st.sidebar.metric("Live Index", f"{current_price:,.2f}", f"{price_change:+.2f}")
 else:
     st.sidebar.warning("Market Closed (Good Friday Holiday)")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚖️ Weight Reference")
-st.sidebar.write("**9-10/10:** 'Market Changers'. Expect 300+ point gaps.")
-st.sidebar.write("**6-8/10:** 'Trend Setters'. 100-200 point intraday moves.")
+st.sidebar.subheader("⚖️ Weight & Sentiment Guide")
+
+# Detailed Weight Reference
+st.sidebar.markdown("**Individual Item Weights:**")
+st.sidebar.write("• **9-10/10:** 'Market Changers'. Expect 300+ point gaps.")
+st.sidebar.write("• **6-8/10:** 'Trend Setters'. 100-200 point intraday moves.")
+st.sidebar.write("• **Under 5/10:** 'Daily Volatility'. Affects specific stocks.")
+
+# Detailed Sentiment Score Reference
+st.sidebar.markdown("**Net Sentiment Score (Total):**")
+st.sidebar.write("• **31-50:** 'High Stress/Crash/Rally' zone.")
+st.sidebar.write("• **16-30:** 'Active Trend' zone.")
+st.sidebar.write("• **0-15:** 'Sideways/Stable' zone.")
 
 st.sidebar.markdown("---")
 st.sidebar.error("📍 **Bengaluru Alert:**")
