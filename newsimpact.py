@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_master_final")
+st_autorefresh(interval=60000, key="nifty_master_final_v2")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DATASET A: ACTIVE & RECENT EVENTS (PAST 7 DAYS)
@@ -35,7 +35,7 @@ FUTURE_EVENTS_DATA = [
     ["Maharashtra Day", "May 1, 2026", "No Impact", "Market Holiday; trading closed."]
 ]
 
-# 4. SORTING & CELL-ONLY STYLING
+# 4. SORTING & CELL-ONLY STYLING (FIXED Attribute Error)
 def get_clean_table(data_list):
     df = pd.DataFrame(data_list, columns=["Topic", "Exact Timing", "Impact Weight", "Logic Behind Impact"])
     
@@ -44,12 +44,13 @@ def get_clean_table(data_list):
     df['Sort_Key'] = df['Impact Weight'].apply(lambda x: next((v for k, v in rank.items() if k in x), 99))
     df = df.sort_values('Sort_Key').drop(columns=['Sort_Key'])
 
-    # Style only the 'Impact Weight' column text (No full cell/row background)
+    # FIXED: Style only the 'Impact Weight' column text (using .map instead of .applymap)
     def style_impact_text(val):
-        color = 'red' if 'Critical' in val else 'orange' if 'High' in val else 'gold' if 'Moderate' in val else 'black'
+        color = 'red' if 'Critical' in str(val) else 'orange' if 'High' in str(val) else 'gold' if 'Moderate' in str(val) else 'black'
         return f'color: {color}; font-weight: bold;'
 
-    return df.style.applymap(style_impact_text, subset=['Impact Weight'])
+    # .map is the correct method for newer Pandas versions used in Streamlit Cloud
+    return df.style.map(style_impact_text, subset=['Impact Weight'])
 
 # 5. UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
@@ -74,7 +75,7 @@ nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     current_price = nifty_hist['Close'].iloc[-1]
-    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc to [0] for stability
+    opening_price = nifty_hist['Open'].iloc[0] 
     price_change = current_price - opening_price
     st.sidebar.metric("Live Index", f"{current_price:,.2f}", f"{price_change:+.2f}")
     st.sidebar.write(f"IST Update: {datetime.now(IST).strftime('%H:%M:%S')}")
