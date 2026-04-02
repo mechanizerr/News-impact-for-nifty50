@@ -433,3 +433,95 @@ if not st.secrets.get("news_api_key"):
         "Add `news_api_key = 'your_key'` to `.streamlit/secrets.toml`.\n"
         "Free key: https://newsapi.org/register"
     )
+
+# ─── API DIAGNOSTICS ──────────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔬 API Diagnostics")
+
+if st.sidebar.button("▶ Run API Health Check"):
+    gemini_key = st.secrets.get("gemini_api_key", "")
+    news_key   = st.secrets.get("news_api_key", "")
+
+    # ── Gemini check ──
+    st.sidebar.write("**Gemini AI:**")
+    if not gemini_key:
+        st.sidebar.error("❌ Key missing in Secrets")
+    else:
+        st.sidebar.write(f"🔑 Key loaded: `...{gemini_key[-6:]}`")
+        test_prompt = """Analyse this headline and return ONLY a raw JSON array (no markdown):
+1. RBI cuts repo rate by 25bps to 6.25%
+[{"index":1,"relevant":true,"impact_level":"🔴 Critical","weight":9,"logic":"Rate cut boosts HDFCBANK, ICICIBANK; banking sector drives Nifty 100+ pts."}]
+Return the same format for:
+1. RBI cuts repo rate by 25bps
+"""
+        try:
+            with st.sidebar:
+                with st.spinner("Testing Gemini..."):
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"gemini-1.5-flash:generateContent?key={gemini_key}"
+                    )
+                    payload = {
+                        "contents": [{"parts": [{"text": test_prompt}]}],
+                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 200}
+                    }
+                    resp = requests.post(url, json=payload, timeout=15)
+                    data = resp.json()
+
+            if resp.status_code == 200:
+                raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                st.sidebar.success(f"✅ Gemini responding (HTTP {resp.status_code})")
+                st.sidebar.code(raw_text[:300], language="json")
+            elif resp.status_code == 400:
+                st.sidebar.error(f"❌ Bad request (400) — check key format")
+                st.sidebar.code(str(data.get("error", {}).get("message", "")))
+            elif resp.status_code == 403:
+                st.sidebar.error("❌ API key invalid or not enabled (403)")
+                st.sidebar.write("Enable Gemini API at: https://aistudio.google.com/app/apikey")
+            elif resp.status_code == 429:
+                st.sidebar.warning("⚠️ Rate limit hit (429) — free tier quota reached, wait 1 min")
+            else:
+                st.sidebar.error(f"❌ Unexpected status: {resp.status_code}")
+                st.sidebar.code(str(data))
+        except Exception as e:
+            st.sidebar.error(f"❌ Connection failed: {e}")
+
+    # ── NewsAPI check ──
+    st.sidebar.write("**NewsAPI:**")
+    if not news_key:
+        st.sidebar.warning("⚠️ Key missing — RSS feeds still work")
+    else:
+        st.sidebar.write(f"🔑 Key loaded: `...{news_key[-6:]}`")
+        try:
+            with st.sidebar:
+                with st.spinner("Testing NewsAPI..."):
+                    test_url = f"https://newsapi.org/v2/everything?q=Nifty+50&pageSize=1&apiKey={news_key}"
+                    r = requests.get(test_url, timeout=10)
+                    d = r.json()
+            if r.status_code == 200 and d.get("status") == "ok":
+                st.sidebar.success(f"✅ NewsAPI responding — {d.get('totalResults',0)} results available")
+            elif r.status_code == 401:
+                st.sidebar.error("❌ Invalid NewsAPI key (401)")
+            elif r.status_code == 429:
+                st.sidebar.warning("⚠️ NewsAPI rate limit hit (429)")
+            else:
+                st.sidebar.error(f"❌ NewsAPI error {r.status_code}: {d.get('message','')}")
+        except Exception as e:
+            st.sidebar.error(f"❌ NewsAPI connection failed: {e}")
+
+    # ── RSS check ──
+    st.sidebar.write("**RSS Feeds:**")
+    rss_ok, rss_fail = 0, []
+    for name, url in RSS_FEEDS.items():
+        try:
+            feed = feedparser.parse(url)
+            if feed.entries:
+                rss_ok += 1
+            else:
+                rss_fail.append(name)
+        except Exception:
+            rss_fail.append(name)
+    if rss_ok > 0:
+        st.sidebar.success(f"✅ {rss_ok}/{len(RSS_FEEDS)} RSS feeds live")
+    if rss_fail:
+        st.sidebar.warning(f"⚠️ Failed: {', '.join(rss_fail)}")
