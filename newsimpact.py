@@ -8,7 +8,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_final_dynamic_v1")
+st_autorefresh(interval=60000, key="nifty_master_final_v5")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DYNAMIC LOGIC ENGINE (Assigns Weights & Logic based on Keywords)
@@ -43,8 +43,6 @@ def fetch_dynamic_active_events():
                     impact, weight, logic = analyze_headline(entry.title)
                     news_list.append([entry.title, pub_time.strftime("%d %b, %I:%M %p"), impact, weight, logic])
         except: continue
-    
-    # Returning as a list of lists to match your original structure
     return news_list
 
 # 4. DATASETS
@@ -57,7 +55,7 @@ FUTURE_EVENTS_DATA = [
     ["US Fed FOMC Meeting", "April 28-29, 2026", "🔴 Critical", 9, "Global rate outlook and FII capital flow trigger."]
 ]
 
-# 5. STYLING UTILITIES (Restored Original Logic)
+# 5. STYLING UTILITIES
 def get_clean_table(data_list):
     df = pd.DataFrame(data_list, columns=["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact"])
     rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2, "⚪ Low": 3, "No Impact": 4}
@@ -68,11 +66,12 @@ def get_clean_table(data_list):
         return f'color: {color}; font-weight: bold;'
     return df.style.map(style_impact_text, subset=['Impact Level'])
 
-# 6. UI LAYOUT (Restored Original Layout)
+# 6. UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 
 # Sentiment Gauge
-today_score = sum([row for row in ACTIVE_EVENTS_DATA if datetime.now(IST).strftime("%d %b") in row])
+today_str = datetime.now(IST).strftime("%d %b")
+today_score = sum([row[3] for row in ACTIVE_EVENTS_DATA if today_str in row[1]])
 gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
 st.subheader(f"Current Market Intensity: :{gauge_color}[{today_score} / 50]")
 st.progress(min(today_score / 50, 1.0))
@@ -82,7 +81,7 @@ st.info(f"📍 Bengaluru Hub | Last Refresh: {datetime.now(IST).strftime('%d %b,
 if st.button("🔄 Force Refresh Feed Now"):
     st.rerun()
 
-# --- TABLE 1: ACTIVE EVENTS (Now Dynamic) ---
+# --- TABLE 1: ACTIVE EVENTS ---
 st.header("🔴 Active & Recent Events (Sorted by Priority)")
 st.table(get_clean_table(ACTIVE_EVENTS_DATA))
 
@@ -102,7 +101,7 @@ with col2:
     st.write("**31 - 45 (Stress):** Major volatility; expect 300+ point gaps.")
     st.write("**46 - 50 (Black Swan):** Extreme risk; potential circuit breakers.")
 
-# --- SIDEBAR (Restored Original Reorganized Layout) ---
+# --- SIDEBAR REORGANIZED ---
 st.sidebar.error("📍 **Bengaluru Weekend Alert:**")
 st.sidebar.write("The **US Fed meeting** (end of April) is a **9/10 weight**. This will be the biggest driver for FII flows into Indian tech stocks in May.")
 st.sidebar.markdown("---")
@@ -112,7 +111,8 @@ nifty_ticker = yf.Ticker("^NSEI")
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 if not nifty_hist.empty:
     current_p = nifty_hist['Close'].iloc[-1]
-    opening_p = nifty_hist['Open'].iloc 
+    # FIXED: Added [0] to select the first opening price value of the day
+    opening_p = nifty_hist['Open'].iloc[0] 
     change = current_p - opening_p
     st.sidebar.metric("Live Index", f"{current_p:,.2f}", f"{change:+.2f}")
 else:
