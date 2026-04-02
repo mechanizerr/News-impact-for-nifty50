@@ -189,8 +189,8 @@ def fetch_all_data():
     cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
     df = pd.DataFrame(all_news, columns=cols)
     df = df.drop_duplicates(subset=['Topic'])
-    # Filter: only keep medium+ weight news for relevance
-    df = df[df["Weight (1-10)"] >= 2].copy()
+    # Filter: only keep Moderate and above — exclude Low (⚪) impact items
+    df = df[df["Weight (1-10)"] >= 5].copy()
     return df
 
 def fetch_future_data():
@@ -220,6 +220,8 @@ def fetch_future_data():
     cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
     df = pd.DataFrame(future_rows, columns=cols)
     df = df.drop_duplicates(subset=['Topic'])
+    # Exclude Low impact items
+    df = df[df["Weight (1-10)"] >= 5].copy()
     return df
 
 # ─── 6. UI RENDER ─────────────────────────────────────────────────────────────
@@ -309,7 +311,7 @@ st.sidebar.subheader("⚖️ Weight & Sentiment Guide")
 st.sidebar.write("• **9–10/10:** 'Market Changers' — systemic impact.")
 st.sidebar.write("• **6–8/10:** 'Trend Setters' — sector-level impact.")
 st.sidebar.write("• **3–5/10:** 'Watch List' — stock-specific moves.")
-st.sidebar.write("• **1–2/10:** 'Background Noise' — minimal impact.")
+st.sidebar.write("• **< 5/10:** Hidden (Low impact — filtered out).")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📡 Data Sources")
