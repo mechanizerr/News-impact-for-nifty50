@@ -2,5 +2,5 @@ streamlit
 pandas
 yfinance
 feedparser
-streamlit-autorefresh
 pytz
+streamlit-autorefresh
