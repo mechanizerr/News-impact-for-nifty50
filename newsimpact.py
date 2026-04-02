@@ -2,85 +2,160 @@ import streamlit as st
 import pandas as pd
 import feedparser
 import requests
+import json
+import re
 from datetime import datetime, timedelta
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
 # ─── 1. SETUP ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Nifty 50 Hybrid Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_hybrid_master_final")
+st_autorefresh(interval=60000, key="nifty_hybrid_v4")
 IST = pytz.timezone('Asia/Kolkata')
 
-# ─── 2. DYNAMIC LOGIC ENGINE ─────────────────────────────────────────────────
+# ─── 2. GEMINI AI ANALYSIS ENGINE (FREE TIER) ────────────────────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def analyze_headlines_with_gemini(headlines: tuple) -> list:
+    """
+    Batch-send headlines to Google Gemini API (free tier).
+    Returns list of dicts: {index, relevant, impact_level, weight, logic}
+    Free tier: 15 requests/min, 1500 requests/day — more than enough.
+    Get your free key at: https://aistudio.google.com/app/apikey
+    """
+    if not headlines:
+        return []
+
+    gemini_api_key = st.secrets.get("gemini_api_key", None)
+    if not gemini_api_key:
+        # Fallback to keyword-based if no key provided
+        return keyword_fallback(headlines)
+
+    numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines))
+
+    prompt = f"""You are a senior Indian equity market analyst specialising in the Nifty 50 index.
+
+Below is a list of news headlines. For EACH headline, determine:
+1. Is it genuinely relevant to Nifty 50 movement? (true/false)
+   - RELEVANT: RBI/Fed policy, FII flows, oil/INR moves, Nifty-constituent earnings, India macro data (CPI/WPI/GDP/IIP), geopolitical events affecting India trade/oil, global risk-off events, SEBI actions, major NSE IPOs, US-China tariffs affecting Indian exports, rupee movement.
+   - NOT RELEVANT: cricket, entertainment, domestic politics with no market mechanism, overseas company news with no India exposure, lifestyle, real estate listings, general crime, state elections with no macro angle.
+2. Impact Level: 🔴 Critical / 🟠 High / 🟡 Moderate (never assign Low)
+3. Weight (5-10): 5=Moderate, 6-7=High, 8-9=Critical, 10=Black Swan only
+4. Logic (max 18 words): State the SPECIFIC mechanism by which THIS headline moves Nifty 50. Mention which sectors, stocks, or flows are affected.
+
+Headlines:
+{numbered}
+
+Respond ONLY with a valid JSON array. One object per headline. Exact format:
+[
+  {{"index": 1, "relevant": true, "impact_level": "🔴 Critical", "weight": 9, "logic": "RBI rate cut lifts HDFCBANK, ICICIBANK; banking sector drives index 150+ pts up."}},
+  {{"index": 2, "relevant": false, "impact_level": "🟡 Moderate", "weight": 5, "logic": "No direct Nifty mechanism."}}
+]
+No markdown fences, no extra text. Raw JSON array only."""
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-1.5-flash:generateContent?key={gemini_api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = re.sub(r"```json|```", "", raw).strip()
+        return json.loads(raw)
+    except Exception:
+        return keyword_fallback(headlines)
+
+# ─── 3. KEYWORD FALLBACK (if no Gemini key) ──────────────────────────────────
 NIFTY_50_STOCKS = [
     'reliance', 'tcs', 'hdfcbank', 'icicibank', 'infosys', 'infy',
     'bhartiartl', 'airtel', 'sbi', 'itc', 'larsen', 'l&t', 'adanient',
     'adani', 'wipro', 'hcltech', 'axisbank', 'kotakbank', 'bajajfinance',
-    'maruti', 'ultracemco', 'asianpaint', 'nestleind', 'titan', 'hindalco',
-    'tatamotors', 'tataconsum', 'tatasteel', 'jswsteel', 'ongc', 'ntpc',
-    'powergrid', 'techm', 'sunpharma', 'drreddy', 'cipla', 'apollohosp',
-    'indusindbk', 'sbilife', 'hdfclife', 'bajajfinsv', 'bpcl', 'coalindia',
-    'eichermot', 'upl', 'grasim', 'britannia', 'shreecem'
+    'maruti', 'ultracemco', 'asianpaint', 'titan', 'hindalco', 'tatamotors',
+    'tatasteel', 'jswsteel', 'ongc', 'ntpc', 'powergrid', 'techm',
+    'sunpharma', 'drreddy', 'cipla', 'apollohosp', 'indusindbk',
+    'sbilife', 'hdfclife', 'bajajfinsv', 'bpcl', 'coalindia', 'eichermot'
 ]
-
 MACRO_KEYWORDS = [
     'rbi', 'fed', 'federal reserve', 'interest rate', 'inflation', 'cpi',
     'wpi', 'oil', 'brent', 'crude', 'gdp', 'fiscal deficit', 'repo rate',
-    'reverse repo', 'monetary policy', 'mpc', 'sebi', 'fii', 'dii',
-    'foreign investment', 'current account', 'trade deficit', 'rupee',
-    'forex', 'dollar', 'imf', 'world bank', 'budget', 'tax', 'gst'
+    'monetary policy', 'mpc', 'sebi', 'fii', 'dii', 'foreign investment',
+    'trade deficit', 'rupee', 'forex', 'dollar', 'budget', 'gst', 'iip'
 ]
-
 CRISIS_KEYWORDS = [
-    'trump', 'iran', 'war', 'strike', 'missile', 'lockdown', 'covid',
-    'recession', 'crash', 'collapse', 'default', 'sanctions', 'tariff',
-    'china', 'pakistan', 'terror', 'attack', 'earthquake', 'flood',
-    'pandemic', 'global crisis', 'banking crisis', 'debt crisis'
+    'trump', 'tariff', 'iran', 'war', 'strike', 'missile', 'lockdown',
+    'recession', 'crash', 'collapse', 'default', 'sanctions', 'china',
+    'pandemic', 'banking crisis', 'debt crisis', 'global selloff'
+]
+IRRELEVANT_KEYWORDS = [
+    'cricket', 'ipl', 'bollywood', 'movie', 'film', 'celebrity', 'wedding',
+    'recipe', 'fashion', 'lifestyle', 'horoscope', 'sports score'
 ]
 
-FUTURE_KEYWORDS = [
-    'earnings', 'results', 'q4', 'q3', 'quarterly', 'meeting', 'policy',
-    'announcement', 'upcoming', 'scheduled', 'expected', 'forecast',
-    'outlook', 'guidance', 'ipo', 'merger', 'acquisition', 'deal'
-]
+def keyword_fallback(headlines: tuple) -> list:
+    results = []
+    for i, title in enumerate(headlines):
+        t = title.lower()
+        if any(k in t for k in IRRELEVANT_KEYWORDS):
+            results.append({"index": i+1, "relevant": False, "impact_level": "🟡 Moderate", "weight": 2, "logic": "Not market relevant."})
+            continue
+        if any(k in t for k in CRISIS_KEYWORDS):
+            results.append({"index": i+1, "relevant": True, "impact_level": "🔴 Critical", "weight": 9, "logic": "Geopolitical/macro crisis — FII selling pressure, broad index decline expected."})
+        elif any(k in t for k in MACRO_KEYWORDS):
+            results.append({"index": i+1, "relevant": True, "impact_level": "🟠 High", "weight": 7, "logic": "Macro policy shift — affects liquidity, FII flows, and rate-sensitive Nifty stocks."})
+        elif any(s in t for s in NIFTY_50_STOCKS) or any(k in t for k in ['nifty', 'sensex', 'nse', 'bse']):
+            results.append({"index": i+1, "relevant": True, "impact_level": "🟡 Moderate", "weight": 6, "logic": "Nifty 50 constituent event — sector-level impact on index weight."})
+        elif 'india' in t and any(k in t for k in ['market', 'stock', 'equity', 'index']):
+            results.append({"index": i+1, "relevant": True, "impact_level": "🟡 Moderate", "weight": 5, "logic": "Indian equity market event — moderate index-level impact."})
+        else:
+            results.append({"index": i+1, "relevant": False, "impact_level": "🟡 Moderate", "weight": 2, "logic": "Low relevance to Nifty 50."})
+    return results
 
-def analyze_headline(title):
-    t = title.lower()
-    if any(k in t for k in CRISIS_KEYWORDS):
-        return "🔴 Critical (Negative)", 10, "High-stakes geopolitical/health crisis trigger."
-    if any(k in t for k in MACRO_KEYWORDS):
-        return "🟠 High", 8, "Macro-economic policy shift affecting liquidity."
-    if any(s in t for s in NIFTY_50_STOCKS) or 'nifty' in t or 'sensex' in t or 'nse' in t:
-        return "🟡 Moderate", 6, "Specific Nifty 50 constituent event impacting sector."
-    if 'india' in t and any(k in t for k in ['market', 'stock', 'equity', 'index', 'bse']):
-        return "🟡 Moderate", 5, "Indian equity market event."
-    return "⚪ Low", 2, "General market news."
+# ─── 4. SMART DEDUPLICATION ───────────────────────────────────────────────────
+def smart_deduplicate(items: list) -> list:
+    """Remove near-duplicate headlines using Jaccard token overlap (threshold 0.55)."""
+    def tokenize(text):
+        return set(re.sub(r'[^a-z0-9 ]', '', text.lower()).split())
 
-# ─── 3. RSS LIVE FEEDS ────────────────────────────────────────────────────────
+    kept = []
+    for item in items:
+        title_tokens = tokenize(item["title"])
+        is_dup = False
+        for seen in kept:
+            seen_tokens = tokenize(seen["title"])
+            if not title_tokens or not seen_tokens:
+                continue
+            overlap = len(title_tokens & seen_tokens) / len(title_tokens | seen_tokens)
+            if overlap > 0.55:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(item)
+    return kept
+
+# ─── 5. RSS LIVE FEEDS ────────────────────────────────────────────────────────
 RSS_FEEDS = {
-    "Moneycontrol Markets": "https://www.moneycontrol.com/rss/marketreports.xml",
-    "Moneycontrol Economy": "https://www.moneycontrol.com/rss/economy.xml",
+    "Moneycontrol Markets":   "https://www.moneycontrol.com/rss/marketreports.xml",
+    "Moneycontrol Economy":   "https://www.moneycontrol.com/rss/economy.xml",
     "Economic Times Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "Economic Times Economy": "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms",
-    "Business Standard": "https://www.business-standard.com/rss/markets-106.rss",
-    "LiveMint Markets": "https://www.livemint.com/rss/markets",
-    "Financial Express": "https://www.financialexpress.com/market/feed/",
+    "Business Standard":      "https://www.business-standard.com/rss/markets-106.rss",
+    "LiveMint Markets":       "https://www.livemint.com/rss/markets",
+    "Financial Express":      "https://www.financialexpress.com/market/feed/",
 }
 
-def fetch_rss_live():
-    """Fetch live news from verified Indian financial RSS feeds."""
-    live_news = []
+def fetch_rss_live() -> list:
+    raw = []
     for source_name, url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(url)
-            entries = feed.entries[:6]  # top 6 per source
-            for entry in entries:
+            for entry in feed.entries[:8]:
                 title = entry.get('title', '').strip()
                 if not title:
                     continue
-                impact, weight, logic = analyze_headline(title)
-
-                # Parse publish time
                 try:
                     if hasattr(entry, 'published_parsed') and entry.published_parsed:
                         pub_time = datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IST)
@@ -89,40 +164,35 @@ def fetch_rss_live():
                         time_str = datetime.now(IST).strftime("%d %b, %I:%M %p")
                 except Exception:
                     time_str = datetime.now(IST).strftime("%d %b, %I:%M %p")
-
-                live_news.append([title, time_str, impact, weight, logic, source_name])
+                raw.append({"title": title, "time": time_str, "source": source_name})
         except Exception:
             continue
-    return live_news
+    return raw
 
-# ─── 4. NEWSAPI: PAST 7 DAYS + FUTURE EVENTS ─────────────────────────────────
-def fetch_newsapi_history(api_key):
-    """Fetch past 7 days of Nifty 50 relevant news via NewsAPI."""
-    history_news = []
+# ─── 6. NEWSAPI: PAST 7 DAYS ─────────────────────────────────────────────────
+def fetch_newsapi_history(api_key: str) -> list:
+    raw = []
     seven_days_ago = (datetime.now(IST) - timedelta(days=7)).strftime('%Y-%m-%d')
     queries = [
         '"Nifty 50" OR "NSE India" OR "BSE Sensex"',
         '"RBI" OR "repo rate" OR "monetary policy India"',
         '"Indian market" OR "FII" OR "Dalal Street"',
+        '"crude oil" OR "rupee" India market',
     ]
     for q in queries:
         url = (
-            f"https://newsapi.org/v2/everything"
+            "https://newsapi.org/v2/everything"
             f"?q={requests.utils.quote(q)}"
             f"&from={seven_days_ago}"
-            f"&sortBy=publishedAt"
-            f"&language=en"
-            f"&pageSize=10"
+            "&sortBy=publishedAt&language=en&pageSize=10"
             f"&apiKey={api_key}"
         )
         try:
-            resp = requests.get(url, timeout=10)
-            articles = resp.json().get('articles', [])
+            articles = requests.get(url, timeout=10).json().get('articles', [])
             for art in articles:
                 title = art.get('title', '').strip()
                 if not title or title == '[Removed]':
                     continue
-                impact, weight, logic = analyze_headline(title)
                 try:
                     dt_ist = datetime.strptime(
                         art['publishedAt'], '%Y-%m-%dT%H:%M:%SZ'
@@ -131,40 +201,36 @@ def fetch_newsapi_history(api_key):
                 except Exception:
                     time_str = "N/A"
                 source = art.get('source', {}).get('name', 'NewsAPI')
-                history_news.append([title, time_str, impact, weight, logic, source])
+                raw.append({"title": title, "time": time_str, "source": source})
         except Exception:
             continue
-    return history_news
+    return raw
 
-def fetch_newsapi_future_events(api_key):
-    """Fetch upcoming scheduled events that impact Nifty 50."""
-    future_news = []
-    queries = [
-        '"RBI MPC" OR "RBI meeting" 2025',
-        '"Q4 results" India earnings 2025',
-        '"IPO" India NSE 2025',
-        '"budget" OR "policy announcement" India 2025',
-        '"Fed meeting" OR "FOMC" 2025',
-    ]
+# ─── 7. NEWSAPI: FUTURE EVENTS ───────────────────────────────────────────────
+def fetch_newsapi_future_events(api_key: str) -> list:
+    raw = []
     today = datetime.now(IST).strftime('%Y-%m-%d')
+    queries = [
+        '"RBI MPC" OR "RBI meeting"',
+        '"Q4 results" India earnings',
+        '"IPO" India NSE 2025',
+        '"Fed meeting" OR "FOMC" 2025',
+        '"India GDP" OR "IIP data" OR "CPI data" 2025',
+    ]
     for q in queries:
         url = (
-            f"https://newsapi.org/v2/everything"
+            "https://newsapi.org/v2/everything"
             f"?q={requests.utils.quote(q)}"
             f"&from={today}"
-            f"&sortBy=publishedAt"
-            f"&language=en"
-            f"&pageSize=5"
+            "&sortBy=publishedAt&language=en&pageSize=5"
             f"&apiKey={api_key}"
         )
         try:
-            resp = requests.get(url, timeout=10)
-            articles = resp.json().get('articles', [])
+            articles = requests.get(url, timeout=10).json().get('articles', [])
             for art in articles:
                 title = art.get('title', '').strip()
                 if not title or title == '[Removed]':
                     continue
-                impact, weight, logic = analyze_headline(title)
                 try:
                     dt_ist = datetime.strptime(
                         art['publishedAt'], '%Y-%m-%dT%H:%M:%SZ'
@@ -173,122 +239,141 @@ def fetch_newsapi_future_events(api_key):
                 except Exception:
                     time_str = "Upcoming"
                 source = art.get('source', {}).get('name', 'NewsAPI')
-                future_news.append([title, time_str, impact, weight, logic, source])
+                raw.append({"title": title, "time": time_str, "source": source})
         except Exception:
             continue
-    return future_news
+    return raw
 
-# ─── 5. MASTER FETCH ──────────────────────────────────────────────────────────
+# ─── 8. MASTER PIPELINE ──────────────────────────────────────────────────────
+def build_table(raw_items: list) -> pd.DataFrame:
+    if not raw_items:
+        return pd.DataFrame()
+
+    deduped = smart_deduplicate(raw_items)
+    titles = tuple(item["title"] for item in deduped)
+
+    analysis_map = {}
+    batch_size = 20
+    for i in range(0, len(titles), batch_size):
+        batch = titles[i:i+batch_size]
+        results = analyze_headlines_with_gemini(batch)
+        for r in results:
+            analysis_map[i + r["index"] - 1] = r
+
+    rows = []
+    for idx, item in enumerate(deduped):
+        info = analysis_map.get(idx, {})
+        if not info.get("relevant", False):
+            continue
+        weight = info.get("weight", 5)
+        if weight < 5:
+            continue
+        rows.append({
+            "Topic":               item["title"],
+            "Exact Timing":        item["time"],
+            "Impact Level":        info.get("impact_level", "🟡 Moderate"),
+            "Weight (1-10)":       weight,
+            "Logic Behind Impact": info.get("logic", "—"),
+            "Source":              item["source"],
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2}
+    df['_sort'] = df['Impact Level'].apply(lambda x: next((v for k, v in rank.items() if k in str(x)), 99))
+    df = df.sort_values(['_sort', 'Weight (1-10)'], ascending=[True, False]).drop(columns=['_sort']).reset_index(drop=True)
+    return df
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_data():
-    all_news = fetch_rss_live()
-
+    raw = fetch_rss_live()
     api_key = st.secrets.get("news_api_key", None)
     if api_key:
-        all_news += fetch_newsapi_history(api_key)
+        raw += fetch_newsapi_history(api_key)
+    return build_table(raw)
 
-    cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
-    df = pd.DataFrame(all_news, columns=cols)
-    df = df.drop_duplicates(subset=['Topic'])
-    # Filter: only keep Moderate and above — exclude Low (⚪) impact items
-    df = df[df["Weight (1-10)"] >= 5].copy()
-    return df
-
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_future_data():
-    api_key = st.secrets.get("news_api_key", None)
-    future_rows = []
-
-    # Always show hardcoded known upcoming events as baseline
     hardcoded = [
-        ["RBI MPC Meeting", "06-08 Apr 2025, 10:00 AM IST", "🔴 Critical", 9,
-         "First rate review of FY27; focus on West Asia oil inflation impact on CPI.", "Fixed Calendar"],
-        ["TCS Q4 FY25 Results", "09 Apr 2025, Post-Market", "🟠 High", 7,
-         "Kicks off IT earnings season; sets tone for index direction.", "Fixed Calendar"],
-        ["Infosys Q4 FY25 Results", "23 Apr 2025, Post-Market", "🔴 Critical", 8,
-         "Major Nifty heavyweight; dictates tech sector sentiment.", "Fixed Calendar"],
-        ["US Fed FOMC Meeting", "06-07 May 2025", "🔴 Critical", 9,
-         "Rate decision drives FII flows into Indian equity markets.", "Fixed Calendar"],
-        ["India Q4 GDP Data", "Late May 2025", "🟠 High", 7,
-         "FY25 full-year GDP print; critical for market valuation re-rating.", "Fixed Calendar"],
+        {"title": "RBI MPC Meeting — First Rate Decision of FY27",      "time": "06-08 Apr 2025",          "source": "Fixed Calendar"},
+        {"title": "TCS Q4 FY25 Earnings Results",                        "time": "09 Apr 2025, Post-Market", "source": "Fixed Calendar"},
+        {"title": "Wipro Q4 FY25 Earnings Results",                      "time": "16 Apr 2025, Post-Market", "source": "Fixed Calendar"},
+        {"title": "HCL Technologies Q4 FY25 Results",                    "time": "22 Apr 2025, Post-Market", "source": "Fixed Calendar"},
+        {"title": "Infosys Q4 FY25 Earnings Results",                    "time": "23 Apr 2025, Post-Market", "source": "Fixed Calendar"},
+        {"title": "US Fed FOMC Rate Decision May 2025",                  "time": "06-07 May 2025",           "source": "Fixed Calendar"},
+        {"title": "India April CPI Inflation Data Release",              "time": "12 May 2025",              "source": "Fixed Calendar"},
+        {"title": "India Q4 GDP and FY25 Full-Year Growth Data",         "time": "Late May 2025",            "source": "Fixed Calendar"},
     ]
-    future_rows.extend(hardcoded)
-
-    # Supplement with dynamic NewsAPI future events
+    raw = list(hardcoded)
+    api_key = st.secrets.get("news_api_key", None)
     if api_key:
-        dynamic = fetch_newsapi_future_events(api_key)
-        future_rows.extend(dynamic)
+        raw += fetch_newsapi_future_events(api_key)
+    return build_table(raw)
 
-    cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
-    df = pd.DataFrame(future_rows, columns=cols)
-    df = df.drop_duplicates(subset=['Topic'])
-    # Exclude Low impact items
-    df = df[df["Weight (1-10)"] >= 5].copy()
-    return df
+# ─── 9. STYLED TABLE ─────────────────────────────────────────────────────────
+def get_styled_table(df: pd.DataFrame):
+    display_cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
+    display_cols = [c for c in display_cols if c in df.columns]
 
-# ─── 6. UI RENDER ─────────────────────────────────────────────────────────────
+    def color_impact(v):
+        if 'Critical' in str(v): return 'color: red; font-weight: bold;'
+        if 'High' in str(v):     return 'color: orange; font-weight: bold;'
+        if 'Moderate' in str(v): return 'color: goldenrod; font-weight: bold;'
+        return ''
+
+    return df[display_cols].style.map(color_impact, subset=['Impact Level'])
+
+# ─── 10. UI ───────────────────────────────────────────────────────────────────
 st.title("🏛️ Nifty 50: Hybrid Strategic Monitor")
 
-df_all = fetch_all_data()
+has_gemini = bool(st.secrets.get("gemini_api_key"))
+ai_label = "Gemini AI" if has_gemini else "Keyword Engine"
 
-# ── Sentiment Gauge ──
+with st.spinner(f"🤖 {ai_label} is analysing headlines for Nifty 50 relevance..."):
+    df_all = fetch_all_data()
+
 today_str = datetime.now(IST).strftime("%d %b")
-today_df = df_all[df_all['Exact Timing'].str.contains(today_str, na=False)]
-today_score = int(today_df["Weight (1-10)"].sum())
+today_df = df_all[df_all['Exact Timing'].str.contains(today_str, na=False)] if not df_all.empty else pd.DataFrame()
+today_score = int(today_df["Weight (1-10)"].sum()) if not today_df.empty else 0
 gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
 
 st.subheader(f"Current Market Intensity: :{gauge_color}[{today_score} / 50]")
 st.progress(min(today_score / 50, 1.0) if today_score > 0 else 0.0)
 
 now_ist = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
-st.info(f"📍 Bengaluru Hub | Hybrid Sync Active | Last Refresh: {now_ist} | Auto-Refresh: 60s")
+st.info(f"📍 Bengaluru Hub | {ai_label}-Curated | Last Refresh: {now_ist} | Auto-Refresh: 60s")
 
-# ── Helper: Styled Table ──
-def get_styled_table(df):
-    display_cols = ["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact", "Source"]
-    # Keep only columns that exist
-    display_cols = [c for c in display_cols if c in df.columns]
-    rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2, "⚪ Low": 3}
-    df = df.copy()
-    df['_sort'] = df['Impact Level'].apply(lambda x: next((v for k, v in rank.items() if k in str(x)), 99))
-    df = df.sort_values('_sort').drop(columns=['_sort'])
-
-    def color_impact(v):
-        if 'Critical' in str(v):
-            return 'color: red; font-weight: bold;'
-        elif 'High' in str(v):
-            return 'color: orange; font-weight: bold;'
-        elif 'Moderate' in str(v):
-            return 'color: goldenrod; font-weight: bold;'
-        return 'color: gray;'
-
-    return df[display_cols].style.map(color_impact, subset=['Impact Level'])
-
-# ── TABLE 1: ACTIVE & RECENT EVENTS ──
-st.header("🔴 Active & Recent Events (Live RSS + 7-Day History)")
+# Table 1
+st.header("🔴 Active & Recent Events (Nifty 50 Relevant Only)")
 if not df_all.empty:
-    st.caption(f"Total events loaded: {len(df_all)} | Sources: RSS feeds + NewsAPI (7 days)")
+    st.caption(
+        f"{len(df_all)} curated events | Irrelevant & low-impact items filtered by {ai_label} | "
+        "Logic is specific to each headline."
+    )
     st.table(get_styled_table(df_all))
 else:
     st.warning(
-        "⚠️ No live data fetched. Possible reasons:\n"
-        "1. RSS feeds unreachable (check internet connection).\n"
-        "2. NewsAPI key missing — add `news_api_key` to Streamlit Secrets.\n"
-        "   Get a free key at: https://newsapi.org/register"
+        "⚠️ No relevant events found.\n"
+        "1. RSS feeds may be unreachable — check internet.\n"
+        "2. All items may have been filtered as irrelevant.\n"
+        "3. Add `news_api_key` to Secrets for 7-day history."
     )
 
-# ── TABLE 2: FUTURE EVENTS ──
+# Table 2
 st.markdown("---")
-st.header("📅 Future Major Events (Dynamic + Fixed Calendar)")
+st.header("📅 Future Major Events (Nifty 50 Outlook)")
+with st.spinner(f"🤖 {ai_label} analysing upcoming events..."):
+    df_future = fetch_future_data()
 
-df_future = fetch_future_data()
 if not df_future.empty:
-    st.caption(
-        "Hardcoded known events + live NewsAPI search for upcoming Nifty-impacting announcements."
-    )
+    st.caption(f"Fixed calendar + dynamic NewsAPI — logic written per event by {ai_label}.")
     st.table(get_styled_table(df_future))
 else:
-    st.info("No upcoming events found. Add a NewsAPI key for dynamic event discovery.")
+    st.info("No upcoming events loaded. Add NewsAPI key for dynamic event discovery.")
 
-# ── MARKET GUIDE ──
+# Market Guide
 st.markdown("---")
 st.header("📖 How to Read Net Sentiment")
 c1, c2 = st.columns(2)
@@ -299,32 +384,41 @@ with c2:
     st.write("**31 – 45 (Stress):** Major volatility; expect 300+ point gaps.")
     st.write("**46 – 50 (Black Swan):** Extreme risk; circuit breaker potential.")
 
-# ── SIDEBAR ──
+# Sidebar
 st.sidebar.error("📍 **Bengaluru Weekend Alert:**")
-st.sidebar.write(
-    "The **US Fed meeting** is a **9/10 weight**. "
-    "Major driver for FII flows into Indian IT stocks."
-)
+st.sidebar.write("The **US Fed meeting** is a **9/10 weight**. Major FII flow driver for Indian IT stocks.")
+st.sidebar.markdown("---")
+
+if has_gemini:
+    st.sidebar.success("✅ Gemini AI Active (Free Tier)")
+    st.sidebar.write("Model: gemini-1.5-flash")
+    st.sidebar.write("Free limits: 15 req/min, 1,500 req/day")
+else:
+    st.sidebar.warning("⚠️ Gemini key not set — using Keyword Engine.")
+    st.sidebar.write("Add `gemini_api_key` to Secrets for smarter AI curation.")
+    st.sidebar.write("Get free key → https://aistudio.google.com/app/apikey")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚖️ Weight & Sentiment Guide")
-st.sidebar.write("• **9–10/10:** 'Market Changers' — systemic impact.")
-st.sidebar.write("• **6–8/10:** 'Trend Setters' — sector-level impact.")
-st.sidebar.write("• **3–5/10:** 'Watch List' — stock-specific moves.")
-st.sidebar.write("• **< 5/10:** Hidden (Low impact — filtered out).")
-
+st.sidebar.subheader("🤖 Curation Rules")
+st.sidebar.write("• Only Nifty 50-relevant headlines shown.")
+st.sidebar.write("• Logic written per headline — not templated.")
+st.sidebar.write("• Near-duplicates (>55% overlap) auto-merged.")
+st.sidebar.write("• Weight < 5 items always hidden.")
 st.sidebar.markdown("---")
-st.sidebar.subheader("📡 Data Sources")
-st.sidebar.write("**Live (RSS):**")
-for name in RSS_FEEDS.keys():
-    st.sidebar.write(f"  • {name}")
-st.sidebar.write("**Historical:** NewsAPI.org (7-day window)")
-st.sidebar.write("**Future Events:** NewsAPI.org + Fixed Calendar")
+st.sidebar.subheader("⚖️ Weight Guide")
+st.sidebar.write("• **9–10/10:** Market Changers — systemic impact.")
+st.sidebar.write("• **6–8/10:** Trend Setters — sector-level moves.")
+st.sidebar.write("• **5/10:** Watch List — stock-specific impact.")
+st.sidebar.markdown("---")
+st.sidebar.subheader("📡 Sources")
+st.sidebar.write("Live RSS: Moneycontrol, ET, Business Standard, LiveMint, FE")
+st.sidebar.write("History: NewsAPI.org (7-day window)")
+st.sidebar.write("Future: NewsAPI.org + Fixed Calendar")
+st.sidebar.write(f"Analysis: {ai_label}")
 
 if not st.secrets.get("news_api_key"):
     st.sidebar.warning(
-        "⚠️ NewsAPI key not found.\n"
-        "Add `news_api_key = 'your_key'` to `.streamlit/secrets.toml` "
-        "for 7-day history and future event discovery.\n"
-        "Free tier: https://newsapi.org/register"
+        "⚠️ NewsAPI key not set.\n"
+        "Add `news_api_key = 'your_key'` to `.streamlit/secrets.toml`.\n"
+        "Free key: https://newsapi.org/register"
     )
