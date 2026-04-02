@@ -4,6 +4,7 @@ import feedparser
 import requests
 import json
 import re
+import time
 from datetime import datetime, timedelta
 import pytz
 from streamlit_autorefresh import st_autorefresh
@@ -264,7 +265,7 @@ def build_table(raw_items: list) -> pd.DataFrame:
     gemini_key = st.secrets.get("gemini_api_key", "")
 
     analysis_map = {}
-    batch_size = 20
+    batch_size = 10
     for i in range(0, len(titles), batch_size):
         batch = titles[i:i+batch_size]
         results = analyze_headlines_with_gemini(batch, gemini_key)
@@ -465,7 +466,14 @@ Return the same format for:
                         "contents": [{"parts": [{"text": test_prompt}]}],
                         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 200}
                     }
-                    resp = requests.post(url, json=payload, timeout=15)
+                    resp = None
+                    for attempt in range(3):
+                        resp = requests.post(url, json=payload, timeout=15)
+                        if resp.status_code == 429:
+                            st.sidebar.info(f"Rate limited, retrying ({attempt+1}/3)...")
+                            time.sleep(2 ** attempt)
+                            continue
+                        break
                     data = resp.json()
 
             if resp.status_code == 200:
@@ -479,7 +487,11 @@ Return the same format for:
                 st.sidebar.error("❌ API key invalid or not enabled (403)")
                 st.sidebar.write("Enable Gemini API at: https://aistudio.google.com/app/apikey")
             elif resp.status_code == 429:
-                st.sidebar.warning("⚠️ Rate limit hit (429) — free tier quota reached, wait 1 min")
+                st.sidebar.warning(
+                    "⚠️ Rate limit (429) — retried 3x, still throttled.\n"
+                    "Free tier allows 15 req/min. Wait 60s and try again.\n"
+                    "Your app is fine — results are cached for 5 min so it won't hit this during normal use."
+                )
             else:
                 st.sidebar.error(f"❌ Unexpected status: {resp.status_code}")
                 st.sidebar.code(str(data))
