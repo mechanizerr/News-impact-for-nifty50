@@ -15,7 +15,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 # ─── 2. GEMINI AI ANALYSIS ENGINE (FREE TIER) ────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
-def analyze_headlines_with_gemini(headlines: tuple) -> list:
+def analyze_headlines_with_gemini(headlines: tuple, gemini_api_key: str = "") -> list:
     """
     Batch-send headlines to Google Gemini API (free tier).
     Returns list of dicts: {index, relevant, impact_level, weight, logic}
@@ -25,9 +25,7 @@ def analyze_headlines_with_gemini(headlines: tuple) -> list:
     if not headlines:
         return []
 
-    gemini_api_key = st.secrets.get("gemini_api_key", None)
     if not gemini_api_key:
-        # Fallback to keyword-based if no key provided
         return keyword_fallback(headlines)
 
     numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines))
@@ -40,17 +38,23 @@ Below is a list of news headlines. For EACH headline, determine:
    - NOT RELEVANT: cricket, entertainment, domestic politics with no market mechanism, overseas company news with no India exposure, lifestyle, real estate listings, general crime, state elections with no macro angle.
 2. Impact Level: 🔴 Critical / 🟠 High / 🟡 Moderate (never assign Low)
 3. Weight (5-10): 5=Moderate, 6-7=High, 8-9=Critical, 10=Black Swan only
-4. Logic (max 18 words): State the SPECIFIC mechanism by which THIS headline moves Nifty 50. Mention which sectors, stocks, or flows are affected.
+4. logic: 1 sentence MAX 18 words. MUST be specific to THIS headline — name the exact mechanism, sector, or stock affected. NEVER repeat the same logic for multiple headlines. NEVER use "FII selling pressure, broad index decline expected" as a generic answer.
+
+Good logic examples:
+- "Iran crude spike hits aviation INDIGO, SPICEJET; ONGC, BPCL gain on oil prices."
+- "Dow crash triggers risk-off; FIIs sell TCS, Infosys pre-open Monday selloff expected."
+- "Gold surge signals equity rotation; Nifty metals HINDALCO, TATASTEEL rally likely."
+- "India market-cap fall signals FII exit; broad selling in heavyweight RELIANCE, HDFCBANK."
+- "US tariffs on India raise export risk; IT sector TCS, INFY face margin compression."
 
 Headlines:
 {numbered}
 
-Respond ONLY with a valid JSON array. One object per headline. Exact format:
+Return ONLY a raw JSON array, no markdown, no explanation:
 [
-  {{"index": 1, "relevant": true, "impact_level": "🔴 Critical", "weight": 9, "logic": "RBI rate cut lifts HDFCBANK, ICICIBANK; banking sector drives index 150+ pts up."}},
-  {{"index": 2, "relevant": false, "impact_level": "🟡 Moderate", "weight": 5, "logic": "No direct Nifty mechanism."}}
-]
-No markdown fences, no extra text. Raw JSON array only."""
+  {{"index": 1, "relevant": true, "impact_level": "🔴 Critical", "weight": 9, "logic": "Specific 18-word mechanism for headline 1."}},
+  {{"index": 2, "relevant": false, "impact_level": "🟡 Moderate", "weight": 5, "logic": "Not relevant to Nifty 50."}}
+]"""
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -58,14 +62,20 @@ No markdown fences, no extra text. Raw JSON array only."""
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
     }
 
     try:
         resp = requests.post(url, json=payload, timeout=30)
         raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        # If >50% rows share identical logic string, Gemini returned templated output — reject
+        logics = [item.get("logic","") for item in parsed]
+        from collections import Counter
+        if logics and Counter(logics).most_common(1)[0][1] > len(logics) * 0.4:
+            return keyword_fallback(headlines)
+        return parsed
     except Exception:
         return keyword_fallback(headlines)
 
@@ -251,12 +261,13 @@ def build_table(raw_items: list) -> pd.DataFrame:
 
     deduped = smart_deduplicate(raw_items)
     titles = tuple(item["title"] for item in deduped)
+    gemini_key = st.secrets.get("gemini_api_key", "")
 
     analysis_map = {}
     batch_size = 20
     for i in range(0, len(titles), batch_size):
         batch = titles[i:i+batch_size]
-        results = analyze_headlines_with_gemini(batch)
+        results = analyze_headlines_with_gemini(batch, gemini_key)
         for r in results:
             analysis_map[i + r["index"] - 1] = r
 
