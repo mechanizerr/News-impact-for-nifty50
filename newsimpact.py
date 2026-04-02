@@ -1,17 +1,16 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_master_refresh")
+st_autorefresh(interval=60000, key="nifty_master_final")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DATASET A: ACTIVE & RECENT EVENTS (PAST 7 DAYS)
-# Sorted manually by Impact: Critical > High > Moderate
 ACTIVE_EVENTS_DATA = [
     ["Trump’s Iran Strike Threat", "02-Apr 09:15 AM", "🔴 Critical (Negative)", "President Trump's overnight speech triggered a 426-point gap-down on war fears."],
     ["RBI Currency Intervention", "02-Apr 01:30 PM", "🔴 Critical (Positive)", "RBI restricted banks from NDFs; Rupee rebounded 188 paise from record lows."],
@@ -36,20 +35,23 @@ FUTURE_EVENTS_DATA = [
     ["Maharashtra Day", "May 1, 2026", "No Impact", "Market Holiday; trading closed."]
 ]
 
-# 4. SORTING & STYLING UTILITIES
-def get_styled_table(data_list):
+# 4. SORTING & CELL-ONLY STYLING
+def get_clean_table(data_list):
     df = pd.DataFrame(data_list, columns=["Topic", "Exact Timing", "Impact Weight", "Logic Behind Impact"])
-    # Rank for sorting: Critical(0), High(1), Moderate(2), Low(3), No Impact(4)
+    
+    # Priority for Sorting
     rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2, "⚪ Low": 3, "No Impact": 4}
     df['Sort_Key'] = df['Impact Weight'].apply(lambda x: next((v for k, v in rank.items() if k in x), 99))
     df = df.sort_values('Sort_Key').drop(columns=['Sort_Key'])
-    
-    return df.style.apply(lambda x: [
-        'background-color: #ffcccc' if 'Critical' in str(v) else 
-        'background-color: #ffe0b3' if 'High' in str(v) else '' for v in x
-    ], axis=1)
 
-# 5. MAIN UI LAYOUT
+    # Style only the 'Impact Weight' column text (No full cell/row background)
+    def style_impact_text(val):
+        color = 'red' if 'Critical' in val else 'orange' if 'High' in val else 'gold' if 'Moderate' in val else 'black'
+        return f'color: {color}; font-weight: bold;'
+
+    return df.style.applymap(style_impact_text, subset=['Impact Weight'])
+
+# 5. UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 st.info(f"📍 Monitoring from **Bengaluru** | Last Refresh: {datetime.now(IST).strftime('%d %b, %I:%M:%S %p')}")
 
@@ -57,24 +59,22 @@ if st.button("🔄 Force Refresh Feed Now"):
     st.rerun()
 
 # --- TABLE 1: ACTIVE EVENTS ---
-st.header("🔴 Active & Recent Events (Sorted Critical to Low)")
-st.table(get_styled_table(ACTIVE_EVENTS_DATA))
+st.header("🔴 Active & Recent Events (Sorted by Priority)")
+st.table(get_clean_table(ACTIVE_EVENTS_DATA))
 
 # --- TABLE 2: FUTURE EVENTS ---
 st.markdown("---")
 st.header("📅 One-Month Future Outlook (Scheduled Triggers)")
-st.table(get_styled_table(FUTURE_EVENTS_DATA))
+st.table(get_clean_table(FUTURE_EVENTS_DATA))
 
 # --- SIDEBAR: LIVE INDEX TRACKER ---
 st.sidebar.header("NSE: NIFTY 50")
 nifty_ticker = yf.Ticker("^NSEI")
-# Get current day data
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     current_price = nifty_hist['Close'].iloc[-1]
-    # Corrected the TypeError by using .iloc[0] for opening price
-    opening_price = nifty_hist['Open'].iloc[0] 
+    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc to [0] for stability
     price_change = current_price - opening_price
     st.sidebar.metric("Live Index", f"{current_price:,.2f}", f"{price_change:+.2f}")
     st.sidebar.write(f"IST Update: {datetime.now(IST).strftime('%H:%M:%S')}")
