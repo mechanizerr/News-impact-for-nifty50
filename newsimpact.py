@@ -7,7 +7,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # 1. INITIAL SETUP & 1-MINUTE AUTO REFRESH
 st.set_page_config(page_title="Nifty 50 Strategic Impact Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_final_stable")
+st_autorefresh(interval=60000, key="nifty_final_production")
 IST = pytz.timezone('Asia/Kolkata')
 
 # 2. DATASET A: ACTIVE & RECENT EVENTS (PAST 7 DAYS)
@@ -33,7 +33,7 @@ FUTURE_EVENTS_DATA = [
     ["US Fed FOMC Meeting", "April 28-29, 2026", "🔴 Critical", 9, "Global rate outlook and FII capital flow trigger for Indian open."]
 ]
 
-# 4. UTILITIES
+# 4. STYLING UTILITIES
 def get_clean_table(data_list):
     df = pd.DataFrame(data_list, columns=["Topic", "Exact Timing", "Impact Level", "Weight (1-10)", "Logic Behind Impact"])
     rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2, "⚪ Low": 3, "No Impact": 4}
@@ -47,10 +47,14 @@ def get_clean_table(data_list):
 # 5. UI LAYOUT
 st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
 
-# NET SENTIMENT SCORE CALCULATION
-# Filters for events labeled with today's date "02-Apr"
-today_total = sum([row[3] for row in ACTIVE_EVENTS_DATA if "02-Apr" in row[1]])
-st.metric("Today's Net Market Sentiment Score", f"{today_total} / 50", help="Sum of active weights today")
+# NET SENTIMENT SCORE & GAUGE
+# Sum of weights for today's active triggers (02-Apr)
+today_score = sum([row[3] for row in ACTIVE_EVENTS_DATA if "02-Apr" in row])
+
+# Dynamic Gauge Color
+gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
+st.subheader(f"Current Market Intensity: :{gauge_color}[{today_score} / 50]")
+st.progress(today_score / 50)
 
 st.info(f"📍 Bengaluru Hub | Last Refresh: {datetime.now(IST).strftime('%d %b, %I:%M:%S %p')}")
 
@@ -63,6 +67,17 @@ st.markdown("---")
 st.header("📅 One-Month Future Outlook (Scheduled Triggers)")
 st.table(get_clean_table(FUTURE_EVENTS_DATA))
 
+# --- MARKET GUIDE: READ ME ---
+st.markdown("---")
+st.header("📖 How to Read Net Sentiment")
+col1, col2 = st.columns(2)
+with col1:
+    st.write("**0 - 15 (Low):** Sideways market; narrow price range.")
+    st.write("**16 - 30 (Active):** Clear trend forming; 100-200 point intraday moves.")
+with col2:
+    st.write("**31 - 45 (Stress):** Major volatility; expect 300+ point gaps.")
+    st.write("**46 - 50 (Black Swan):** Extreme risk; potential circuit breakers.")
+
 # --- SIDEBAR: LIVE INDEX & REFERENCE ---
 st.sidebar.header("NSE: NIFTY 50")
 nifty_ticker = yf.Ticker("^NSEI")
@@ -70,18 +85,17 @@ nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     current_price = nifty_hist['Close'].iloc[-1]
-    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc to resolve TypeError
+    opening_price = nifty_hist['Open'].iloc[0] # Fixed .iloc[0] for stability
     price_change = current_price - opening_price
     st.sidebar.metric("Live Index", f"{current_price:,.2f}", f"{price_change:+.2f}")
 else:
     st.sidebar.warning("Market Closed (Good Friday Holiday)")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚖️ Weight Reference Guide")
-st.sidebar.write("**9/10 - 10/10:** 'Market Changers'. Expect 300+ point gaps.")
-st.sidebar.write("**6/10 - 8/10:** 'Trend Setters'. 100-200 point intraday moves.")
-st.sidebar.write("**Under 5/10:** 'Daily Volatility'. Affects specific stocks.")
+st.sidebar.subheader("⚖️ Weight Reference")
+st.sidebar.write("**9-10/10:** 'Market Changers'. Expect 300+ point gaps.")
+st.sidebar.write("**6-8/10:** 'Trend Setters'. 100-200 point intraday moves.")
 
 st.sidebar.markdown("---")
-st.sidebar.error("📍 **Bengaluru Weekend Alert:**")
+st.sidebar.error("📍 **Bengaluru Alert:**")
 st.sidebar.write("Note that the **US Fed meeting** (end of April) is a **9/10 weight**. This will be the biggest driver for FII flows into Indian tech stocks in May.")
