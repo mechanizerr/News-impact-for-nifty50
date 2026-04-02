@@ -58,7 +58,7 @@ Return ONLY a raw JSON array, no markdown, no explanation:
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={gemini_api_key}"
+        f"gemini-2.0-flash:generateContent?key={gemini_api_key}"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -402,7 +402,7 @@ st.sidebar.markdown("---")
 
 if has_gemini:
     st.sidebar.success("✅ Gemini AI Active (Free Tier)")
-    st.sidebar.write("Model: gemini-1.5-flash")
+    st.sidebar.write("Model: gemini-2.0-flash")
     st.sidebar.write("Free limits: 15 req/min, 1,500 req/day")
 else:
     st.sidebar.warning("⚠️ Gemini key not set — using Keyword Engine.")
@@ -459,7 +459,7 @@ Return the same format for:
                 with st.spinner("Testing Gemini..."):
                     url = (
                         "https://generativelanguage.googleapis.com/v1beta/models/"
-                        f"gemini-1.5-flash:generateContent?key={gemini_key}"
+                        f"gemini-2.0-flash:generateContent?key={gemini_key}"
                     )
                     payload = {
                         "contents": [{"parts": [{"text": test_prompt}]}],
