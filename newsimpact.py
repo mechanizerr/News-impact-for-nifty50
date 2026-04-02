@@ -2,91 +2,103 @@ import streamlit as st
 import pandas as pd
 import feedparser
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# 1. SETUP: Auto-refresh every 1 minute
-st_autorefresh(interval=60000, key="nifty_refresh_1min")
-
-# Timezone for Bengaluru
+# 1. INITIAL SETUP
 IST = pytz.timezone('Asia/Kolkata')
-st.set_page_config(page_title="Nifty 50 Smart Tracker", layout="wide")
+st.set_page_config(page_title="Nifty 50: 7-Day Impact Monitor", layout="wide")
+st_autorefresh(interval=60000, key="nifty_weekly_refresh")
 
-# 2. IMPACT LOGIC ENGINE (Historical & Government)
-def get_impact_details(headline):
-    h = headline.lower()
-    # Topic | Impact Weight | Logic
-    if any(x in h for x in ['trump', 'iran', 'strike', 'war']):
-        return "Trump/Iran Conflict", "High (Negative)", "Geopolitical escalation triggers global 'risk-off' and FII outflows."
-    if any(x in h for x in ['oil', 'brent', 'crude']):
-        return "Crude Oil Spike", "Moderate (Negative)", "Higher import bill threatens India's fiscal deficit and inflation."
-    if any(x in h for x in ['rbi', 'intervention', 'rupee', 'ndf']):
-        return "RBI Intervention", "High (Positive)", "Curbs on currency speculation support the Rupee and stabilize markets."
-    if any(x in h for x in ['fii', 'selling', 'offload']):
-        return "FII Panic Selling", "Moderate (Negative)", "Foreign capital fleeing to safe havens like USD amid global uncertainty."
-    if any(x in h for x in ['pmi', 'manufacturing', 'industrial']):
-        return "Manufacturing PMI", "Low (Negative)", "Slowing industrial momentum weighs on heavy machinery and auto stocks."
-    if any(x in h for x in ['tariff', 'us trade', 'steel', 'pharma']):
-        return "US Import Tariffs", "Low (Negative)", "Potential 25% tariffs create drag on Export-oriented Nifty sectors."
-    if any(x in h for x in ['tcs', 'reliance', 'hdfc', 'earnings', 'q4']):
-        return "Corporate Earnings", "High (Neutral)", "Blue-chip results dictate the immediate trend for the Nifty 50 index."
+# 2. STRATEGIC MASTER KEYWORDS (Refined for Sorting)
+IMPACT_RANK = {"🔴 Critical": 1, "🟠 High": 2, "🟡 Moderate": 3, "⚪ Low/Neutral": 4}
+
+KEYWORDS = {
+    "CRITICAL": ['trump', 'iran', 'strike', 'war', 'lockdown', 'scam', 'crash'],
+    "HIGH": ['rbi', 'fed', 'budget', 'gst', 'inflation', 'cpi', 'oil', 'brent', 'fii'],
+    "MODERATE": ['earnings', 'q4', 'tcs', 'reliance', 'pmi', 'tariff', 'dividend', 'hcltech']
+}
+
+def analyze_impact(title):
+    title = title.lower()
+    if any(k in title for k in KEYWORDS["CRITICAL"]): return "🔴 Critical"
+    if any(k in title for k in KEYWORDS["HIGH"]): return "🟠 High"
+    if any(k in title for k in KEYWORDS["MODERATE"]): return "🟡 Moderate"
+    return "⚪ Low/Neutral"
+
+# 3. NEWS AGGREGATOR (Past 1 Week)
+def get_weekly_nifty_feeds():
+    # Multi-source for reliability
+    RSS_URLS = [
+        "https://indiatimes.com",
+        "https://moneycontrol.com",
+        "https://livemint.com"
+    ]
     
-    return "Market Volatility", "Low", "General price action based on intraday liquidity and sentiment."
+    week_ago = datetime.now(IST) - timedelta(days=7)
+    news_data = []
 
-# 3. DATA FETCHING
-def fetch_live_impact():
-    sources = ["https://indiatimes.com", 
-               "https://moneycontrol.com"]
-    data = []
-    for url in sources:
-        feed = feedparser.parse(url)
-        for entry in feed.entries[:5]:
-            topic, weight, logic = get_impact_details(entry.title)
-            data.append({
-                "Topic": topic,
-                "Exact Timing": datetime.now(IST).strftime("%I:%M %p"),
-                "Impact Weight": weight,
-                "Logic Behind Impact": logic,
-                "Live Headline": entry.title
-            })
-    return pd.DataFrame(data).drop_duplicates(subset=['Topic'])
+    for url in RSS_URLS:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries:
+                # Parse published date
+                published = datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IST)
+                
+                if published > week_ago:
+                    impact = analyze_impact(entry.title)
+                    news_data.append({
+                        "Topic": entry.title[:60] + "...",
+                        "Exact Timing": published.strftime("%d-%b %I:%M %p"),
+                        "Impact Weight": impact,
+                        "Logic Behind Impact": f"Detected trigger in {entry.title[:30]}",
+                        "Raw_Time": published, # For sorting
+                        "Rank": IMPACT_RANK.get(impact, 4) # For sorting
+                    })
+        except: continue
+    
+    df = pd.DataFrame(news_data).drop_duplicates(subset=['Topic'])
+    # SORTING: Impact Level First (Rank 1 to 4), then Latest Time
+    if not df.empty:
+        df = df.sort_values(by=['Rank', 'Raw_Time'], ascending=[True, False]).drop(columns=['Raw_Time', 'Rank'])
+    return df
 
-# 4. UI LAYOUT
-st.title("🏛️ Nifty 50: Strategic Impact Dashboard")
-st.write(f"📍 Monitoring from **Bengaluru** | Last Refresh: {datetime.now(IST).strftime('%I:%M:%S %p')}")
+# 4. UI RENDER
+st.title("🏛️ Nifty 50: 7-Day Strategic Impact Dashboard")
+st.info(f"📍 Location: Bengaluru | Monitoring Window: { (datetime.now(IST)-timedelta(days=7)).strftime('%d %b') } to Today")
 
-if st.button("🔄 Force Manual Refresh"):
+if st.button("🔄 Force Refresh All Feeds"):
     st.rerun()
 
-# --- TABLE 1: ACTIVE EVENTS TILL NOW ---
-st.header("🔴 Active Events (Today's Session)")
-df_live = fetch_live_impact()
-if not df_live.empty:
-    # Color coding the Impact Weight
-    def color_weight(val):
-        color = '#ffcccc' if 'High' in val else '#fff4cc' if 'Moderate' in val else '#e6f3ff'
-        return f'background-color: {color}'
-    
-    st.table(df_live.style.applymap(color_weight, subset=['Impact Weight']))
+# --- TABLE 1: ACTIVE EVENTS (PAST WEEK) ---
+st.header("🔴 Active & Recent Events (Sorted by Impact)")
+df_active = get_weekly_nifty_feeds()
+
+if not df_active.empty:
+    st.dataframe(df_active.style.apply(lambda x: [
+        'background-color: #ffcccc' if 'Critical' in v else 
+        'background-color: #ffe0b3' if 'High' in v else '' for v in x
+    ], axis=1), use_container_width=True)
+else:
+    st.write("No major impact events detected in the last 7 days.")
 
 # --- TABLE 2: FUTURE EVENTS ---
 st.markdown("---")
-st.header("📅 Future Major Events (Nifty 50 Impact)")
+st.header("📅 Future Major Events (Scheduled Triggers)")
 future_data = [
-    ["Good Friday Holiday", "April 3, 2026 (All Day)", "No Impact", "Markets closed; potential position squaring happening today."],
-    ["TCS Q4 FY26 Results", "April 9, 2026 (Post-Market)", "High", "Sets the tone for the IT sector and overall Nifty earnings growth."],
-    ["US CPI Inflation", "April 15, 2026 (06:00 PM)", "High", "Impacts Fed rate cut expectations and FII flows into India."],
-    ["RBI MPC Meeting", "Mid-April 2026", "Critical", "Directly impacts Bank Nifty and rate-sensitive sectors (Auto/Realty)."]
+    ["Good Friday Holiday", "April 3, 2026", "No Impact", "Market Closed; Weekly settlements complete."],
+    ["TCS Q4 FY26 Results", "April 9, 2026", "🟠 High", "IT sector earnings heavy-weight sets the index direction."],
+    ["US CPI Inflation", "April 15, 2026", "🟠 High", "Crucial for FII flow sentiment and global rate outlook."],
+    ["RBI MPC Meeting", "Mid-April 2026", "🔴 Critical", "Interest rate decision directly impacts Banking and Auto stocks."]
 ]
 df_future = pd.DataFrame(future_data, columns=["Topic", "Exact Timing", "Impact Weight", "Logic Behind Impact"])
 st.table(df_future)
 
-# --- SIDEBAR: LIVE NIFTY ---
+# --- SIDEBAR: LIVE METRICS ---
 st.sidebar.header("NSE: NIFTY 50")
 nifty = yf.Ticker("^NSEI").history(period="1d", interval="1m")
 if not nifty.empty:
-    curr = nifty['Close'].iloc[-1]
-    change = curr - nifty['Open'].iloc[0]
-    st.sidebar.metric("Current Value", f"{curr:,.2f}", f"{change:+.2f}")
-st.sidebar.info("Auto-refreshing every 60 seconds.")
+    price = nifty['Close'].iloc[-1]
+    change = price - nifty['Open'].iloc[0]
+    st.sidebar.metric("Live Index", f"{price:,.2f}", f"{change:+.2f}")
