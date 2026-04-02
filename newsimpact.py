@@ -6,12 +6,15 @@ from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# 1. TIMEZONE & CONFIG
+# 1. AUTO-REFRESH: Set to 60,000ms (1 minute)
+# This will rerun the entire script automatically every 60 seconds.
+st_autorefresh(interval=60000, key="nifty_refresh_1min")
+
+# 2. TIMEZONE & CONFIG
 IST = pytz.timezone('Asia/Kolkata')
 st.set_page_config(page_title="Nifty 50 Pro Monitor", layout="wide")
-st_autorefresh(interval=60000, key="nifty_refresh")
 
-# 2. MASTER KEYWORDS
+# 3. MASTER KEYWORDS (Historical & Government Triggers)
 KEYWORDS = {
     "CRITICAL": ['covid', 'lockdown', 'pandemic', 'virus', 'variant', 'war', 'missile', 'attack', 'scam', 'crash'],
     "GOVERNMENT": ['rbi', 'repo rate', 'gst', 'budget', 'nirmala sitharaman', 'modi', 'fdi', 'regulation', 'sebi', 'tariff'],
@@ -27,7 +30,7 @@ def analyze_impact(title):
     if any(k in title for k in KEYWORDS["GLOBAL"]): return "🔵 High (Global Macro)"
     return "⚪ Low/Neutral"
 
-# 3. DATA FETCHING
+# 4. DATA FETCHING
 def get_nifty_feeds():
     sources = {
         "Moneycontrol": "https://moneycontrol.com",
@@ -48,14 +51,14 @@ def get_nifty_feeds():
         except: continue
     return pd.DataFrame(news_data)
 
-# 4. UI RENDER
+# 5. UI RENDER
 st.title("🏛️ Nifty 50 Pro: Policy & Impact Monitor")
 st.write(f"📍 Monitoring Active from **Bengaluru** | Last Sync: {datetime.now(IST).strftime('%I:%M %p')}")
 
 if st.button("🔄 Force Refresh Feed"):
     st.rerun()
 
-# TABLE 1: Real-Time News
+# TABLE 1: Real-Time News (Updates every 60s)
 st.subheader("🔴 Real-Time Impact Feed")
 df_news = get_nifty_feeds()
 if not df_news.empty:
@@ -75,14 +78,14 @@ future_events = [
 ]
 st.table(pd.DataFrame(future_events))
 
-# SIDEBAR: LIVE INDEX (FIXED)
+# SIDEBAR: LIVE INDEX (Updates every 60s)
 st.sidebar.header("NSE: NIFTY 50")
 nifty_ticker = yf.Ticker("^NSEI")
 nifty_hist = nifty_ticker.history(period="1d", interval="1m")
 
 if not nifty_hist.empty:
     price = nifty_hist['Close'].iloc[-1]
-    # FIXED: Added .iloc[0] to the opening price to resolve the TypeError
+    # Fixed indexing for Price Change calculation
     change = price - nifty_hist['Open'].iloc[0] 
     st.sidebar.metric("Live Price", f"{price:,.2f}", f"{change:+.2f}")
 else:
