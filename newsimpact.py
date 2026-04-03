@@ -13,101 +13,16 @@ from streamlit_autorefresh import st_autorefresh
 
 # ─── 1. SETUP ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Nifty 50 Hybrid Hub", layout="wide")
-st_autorefresh(interval=60000, key="nifty_v6")
+st_autorefresh(interval=120000, key="nifty_v7")   # 2-min refresh — gentler on rate limits
 IST = pytz.timezone('Asia/Kolkata')
 
 FREE_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.0-pro"]
 
-# ─── 2. RSS + NEWSAPI FETCH (cached 5 min) ───────────────────────────────────
-RSS_FEEDS = {
-    "Moneycontrol Markets":   "https://www.moneycontrol.com/rss/marketreports.xml",
-    "Moneycontrol Economy":   "https://www.moneycontrol.com/rss/economy.xml",
-    "Economic Times Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "Economic Times Economy": "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms",
-    "Business Standard":      "https://www.business-standard.com/rss/markets-106.rss",
-    "LiveMint Markets":       "https://www.livemint.com/rss/markets",
-    "Financial Express":      "https://www.financialexpress.com/market/feed/",
-}
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_raw_news(news_key: str) -> tuple:
-    """Fetch all raw headlines from RSS + NewsAPI. Cached 5 min. Returns tuple for cache stability."""
-    raw = []
-
-    # RSS
-    for source_name, url in RSS_FEEDS.items():
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:8]:
-                title = entry.get('title', '').strip()
-                if not title:
-                    continue
-                try:
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        pub_time = datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IST)
-                        time_str = pub_time.strftime("%d %b, %I:%M %p")
-                    else:
-                        time_str = datetime.now(IST).strftime("%d %b, %I:%M %p")
-                except Exception:
-                    time_str = datetime.now(IST).strftime("%d %b, %I:%M %p")
-                raw.append((title, time_str, source_name))
-        except Exception:
-            continue
-
-    # NewsAPI
-    if news_key:
-        seven_days_ago = (datetime.now(IST) - timedelta(days=7)).strftime('%Y-%m-%d')
-        queries = [
-            '"Nifty 50" OR "NSE India" OR "BSE Sensex"',
-            '"RBI" OR "repo rate" OR "monetary policy India"',
-            '"Indian market" OR "FII" OR "Dalal Street"',
-            '"crude oil" OR "rupee" India market',
-            '"US tariff" OR "Fed rate" OR "global market"',
-        ]
-        for q in queries:
-            url = (
-                "https://newsapi.org/v2/everything"
-                f"?q={requests.utils.quote(q)}&from={seven_days_ago}"
-                "&sortBy=publishedAt&language=en&pageSize=10"
-                f"&apiKey={news_key}"
-            )
-            try:
-                arts = requests.get(url, timeout=10).json().get('articles', [])
-                for art in arts:
-                    title = art.get('title', '').strip()
-                    if not title or title == '[Removed]':
-                        continue
-                    try:
-                        dt_ist = datetime.strptime(art['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.utc).astimezone(IST)
-                        time_str = dt_ist.strftime("%d %b, %I:%M %p")
-                    except Exception:
-                        time_str = "N/A"
-                    source = art.get('source', {}).get('name', 'NewsAPI')
-                    raw.append((title, time_str, source))
-            except Exception:
-                continue
-
-    # Deduplicate
-    def tokenize(text):
-        return set(re.sub(r'[^a-z0-9 ]', '', text.lower()).split())
-
-    kept = []
-    for item in raw:
-        toks = tokenize(item[0])
-        if not any(
-            len(toks & tokenize(s[0])) / max(len(toks | tokenize(s[0])), 1) > 0.55
-            for s in kept
-        ):
-            kept.append(item)
-
-    return tuple(kept)  # tuple so it's hashable/cacheable
-
-
-# ─── 3. GEMINI CALL — WITH MODEL FALLBACK ────────────────────────────────────
-def call_gemini(prompt: str, gemini_key: str, max_tokens: int = 4096) -> str | None:
+# ─── 2. SINGLE GEMINI CALLER WITH MODEL FALLBACK ─────────────────────────────
+def call_gemini(prompt: str, gemini_key: str, max_tokens: int = 800) -> tuple:
     """
-    Try each free Gemini model in order. Returns raw text or None.
-    Does NOT cache — caching is done at the caller level with stable keys.
+    Try each free model. On 429 wait 65s (full minute reset) then retry.
+    Returns (text, model_name) or (None, None).
     """
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -120,525 +35,295 @@ def call_gemini(prompt: str, gemini_key: str, max_tokens: int = 4096) -> str | N
         )
         for attempt in range(2):
             try:
-                resp = requests.post(url, json=payload, timeout=40)
+                resp = requests.post(url, json=payload, timeout=45)
+                if resp.status_code == 200:
+                    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    return text, model
                 if resp.status_code == 429:
-                    time.sleep(2 ** attempt)
+                    # Wait for rate limit window to reset, then try next model
+                    time.sleep(65 if attempt == 1 else 10)
                     continue
                 if resp.status_code in (404, 400):
-                    break  # try next model
-                if resp.status_code == 200:
-                    return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip(), model
+                    break   # model not available, skip to next
             except Exception:
                 break
     return None, None
 
+# ─── 3. RSS + NEWSAPI — CACHED 5 MIN ─────────────────────────────────────────
+RSS_FEEDS = {
+    "Moneycontrol Markets":   "https://www.moneycontrol.com/rss/marketreports.xml",
+    "Moneycontrol Economy":   "https://www.moneycontrol.com/rss/economy.xml",
+    "Economic Times Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    "Economic Times Economy": "https://economictimes.indiatimes.com/news/economy/rssfeeds/1373380680.cms",
+    "Business Standard":      "https://www.business-standard.com/rss/markets-106.rss",
+    "LiveMint Markets":       "https://www.livemint.com/rss/markets",
+    "Financial Express":      "https://www.financialexpress.com/market/feed/",
+}
 
-# ─── 4. GEMINI ANALYSIS — CACHED ON CONTENT HASH ─────────────────────────────
-@st.cache_data(ttl=86400, show_spinner=False)  # 24h cache per headline
-def gemini_analyze_one(headline_hash: str, headline: str, gemini_key: str) -> dict:
-    """
-    Analyse ONE headline per Gemini call.
-    - Cache key = hash of the headline text → same headline never re-analysed
-    - 24h TTL → each unique headline costs exactly 1 Gemini call ever
-    - 1 headline = tiny prompt = fast response, best quality, no batching waste
-    """
-    if not headline or not gemini_key:
-        return {}
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_raw_news(news_key: str) -> tuple:
+    """Fetch & deduplicate all raw headlines. Returns tuple of (title, time, source)."""
+    raw = []
+    for source_name, url in RSS_FEEDS.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:8]:
+                title = entry.get('title', '').strip()
+                if not title:
+                    continue
+                try:
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        pub = datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IST)
+                        ts = pub.strftime("%d %b, %I:%M %p")
+                    else:
+                        ts = datetime.now(IST).strftime("%d %b, %I:%M %p")
+                except Exception:
+                    ts = datetime.now(IST).strftime("%d %b, %I:%M %p")
+                raw.append((title, ts, source_name))
+        except Exception:
+            continue
 
+    if news_key:
+        seven_days_ago = (datetime.now(IST) - timedelta(days=7)).strftime('%Y-%m-%d')
+        for q in [
+            '"Nifty 50" OR "NSE India" OR "BSE Sensex"',
+            '"RBI" OR "repo rate" OR "monetary policy India"',
+            '"Indian market" OR "FII" OR "Dalal Street"',
+            '"crude oil" OR "rupee" India market',
+            '"US tariff" OR "Fed rate" OR "global market"',
+        ]:
+            try:
+                url = (
+                    "https://newsapi.org/v2/everything"
+                    f"?q={requests.utils.quote(q)}&from={seven_days_ago}"
+                    "&sortBy=publishedAt&language=en&pageSize=10"
+                    f"&apiKey={news_key}"
+                )
+                arts = requests.get(url, timeout=10).json().get('articles', [])
+                for art in arts:
+                    title = art.get('title', '').strip()
+                    if not title or title == '[Removed]':
+                        continue
+                    try:
+                        dt = datetime.strptime(art['publishedAt'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=pytz.utc).astimezone(IST)
+                        ts = dt.strftime("%d %b, %I:%M %p")
+                    except Exception:
+                        ts = "N/A"
+                    raw.append((title, ts, art.get('source', {}).get('name', 'NewsAPI')))
+            except Exception:
+                continue
+
+    # Deduplicate by Jaccard overlap
+    def tok(t): return set(re.sub(r'[^a-z0-9 ]', '', t.lower()).split())
+    kept = []
+    for item in raw:
+        toks = tok(item[0])
+        if not any(len(toks & tok(s[0])) / max(len(toks | tok(s[0])), 1) > 0.55 for s in kept):
+            kept.append(item)
+    return tuple(kept)
+
+# ─── 4. PER-HEADLINE GEMINI ANALYSIS — 24H CACHE ─────────────────────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def gemini_analyze_one(h_hash: str, headline: str, gemini_key: str) -> dict:
+    """
+    One Gemini call per unique headline. Cached 24h — never re-called for same headline.
+    Prompt is compact (<200 tokens) to maximise throughput within rate limits.
+    """
     today = datetime.now(IST).strftime("%d %b %Y")
-    prompt = f"""You are a senior Indian equity market strategist covering Nifty 50. Today is {today}.
+    prompt = f"""Senior Nifty 50 analyst. Today: {today}.
 
-Analyse this ONE news headline and return a single JSON object (not an array).
+Headline: "{headline}"
 
-Headline: {headline}
+Return a single raw JSON object (no markdown):
+{{
+  "relevant": true/false,
+  "topic": "2-5 word Bloomberg label",
+  "sentiment": "Positive"/"Negative"/"Mixed",
+  "impact_level": "🔴 Critical"/"🟠 High"/"🟡 Moderate",
+  "weight": 5-10,
+  "logic": "2-3 sentences: specific Nifty mechanism, sectors, stock names, numbers."
+}}
 
-Return these fields:
-- relevant: true/false — Does this have a DIRECT mechanism to move Nifty 50?
-  TRUE: RBI/Fed policy, FII flows, crude oil/rupee, India macro (CPI/GDP/IIP/WPI), Nifty constituent earnings, US market moves, tariff wars hitting India, geopolitical events affecting India oil/exports, SEBI actions, major NSE IPOs.
-  FALSE: cricket, IPL, Bollywood, crime, lifestyle, real estate, foreign company news with zero India exposure.
+relevant=true only if direct Nifty 50 mechanism exists (RBI/Fed policy, FII flows, crude/rupee, India macro, constituent earnings, US market crash, tariffs hitting India, geopolitical oil/export impact, SEBI, NSE IPO).
+relevant=false for cricket, Bollywood, crime, lifestyle, foreign stocks with no India angle."""
 
-- topic: 2-5 word Bloomberg terminal label. NOT the raw headline. Clean synthesis.
-  Examples: "RBI Repo Rate Cut", "Crude Oil Spike", "FII Selling Surge", "Dow Jones Crash", "US Tariff Escalation", "IT Sector Earnings", "Rupee Weakness", "Gold Rally"
-
-- sentiment: "Positive" / "Negative" / "Mixed" for Nifty 50 direction
-
-- impact_level: "🔴 Critical" / "🟠 High" / "🟡 Moderate"
-  Critical = 200+ pt index swing expected
-  High = 100-200 pt sector move
-  Moderate = stock-specific nudge
-
-- weight: integer 5-10
-
-- logic: 2-3 sentences. Explain the SPECIFIC mechanism — name affected sectors, Nifty stocks, and use any numbers mentioned in the headline. Be precise and unique.
-
-Return ONLY a raw JSON object, no markdown:
-{{"relevant":true,"topic":"Crude Oil Spike","sentiment":"Negative","impact_level":"🔴 Critical","weight":9,"logic":"Brent surging 7% raises India import costs directly. BPCL and ONGC gain on higher realisations but IndiGo faces jet fuel cost pressure. RBI may delay rate cuts due to inflation risk."}}"""
-
-    raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=400)
-    if not raw_text:
+    text, model = call_gemini(prompt, gemini_key, max_tokens=300)
+    if not text:
         return {}
-
     try:
-        clean = re.sub(r"```json|```", "", raw_text).strip()
+        clean = re.sub(r"```json|```", "", text).strip()
         result = json.loads(clean)
-        result["_model"] = model_used
+        result["_model"] = model
         return result
     except Exception:
         return {}
 
-
-def pre_filter_relevant(headlines: tuple) -> list:
+# ─── 5. FUTURE EVENTS — SINGLE GEMINI CALL, CACHED 6H ───────────────────────
+@st.cache_data(ttl=21600, show_spinner=False)
+def gemini_future(gemini_key: str, date_key: str) -> list:
     """
-    Fast keyword pre-filter — runs before Gemini.
-    Drops obvious non-market content so Gemini only sees relevant candidates.
-    Reduces 50-80 raw headlines → ~10-20 for Gemini. Saves ~60% of API calls.
-    """
-    non_market = [
-        'cricket','ipl','bollywood','movie','film','celebrity','wedding',
-        'recipe','fashion','horoscope','murder','crime','arrest','accident',
-        'sports score','entertainment','lifestyle','travel','food','real estate'
-    ]
-    market_signals = [
-        'nifty','sensex','nse','bse','dalal street',
-        'rbi','fed','repo','mpc','monetary','fomc','powell','rate',
-        'fii','fpi','foreign investor','foreign fund',
-        'crude','brent','oil','wti','petroleum',
-        'rupee','inr','forex','dollar index',
-        'inflation','cpi','wpi','gdp','iip',
-        'tariff','trade war','sanction',
-        'war','conflict','strike','missile','iran','ukraine',
-        'earnings','results','q4','q3','quarterly','profit',
-        'gold','silver','comex','ipo','listing','sebi',
-        'india','market','stock','equity','index','shares',
-        'reliance','tcs','hdfc','icici','infosys','wipro','adani',
-        'sbi','itc','bajaj','maruti','titan','ongc','ntpc',
-        'dow','nasdaq','s&p','wall street','us market',
-        'trump','china','geopolit','global market',
-    ]
-    kept = []
-    for i, h in enumerate(headlines):
-        t = h.lower()
-        if any(k in t for k in non_market):
-            continue
-        if any(k in t for k in market_signals):
-            kept.append((i, h))
-    return kept  # list of (original_index, headline)
-
-
-def gemini_analyze_all(headlines: tuple, gemini_key: str, progress_bar=None) -> list:
-    """
-    Smart rate-limit-aware Gemini analysis:
-    1. Pre-filter with keywords → only send ~10-20 relevant headlines to Gemini
-    2. Batch 5 headlines per call → ~3-4 calls total (well under 15/min)
-    3. 5s gap between batches → safe rate spacing
-    4. Hard stop at 12 calls/run → never hits the 15/min ceiling
-    5. Session cache → completed headlines never re-analysed on rerun
-    """
-    if "headline_cache" not in st.session_state:
-        st.session_state["headline_cache"] = {}
-
-    # Step 1: Pre-filter to only market-relevant candidates
-    candidates = pre_filter_relevant(headlines)
-
-    # Step 2: Split into cached vs needs-Gemini
-    to_process = []
-    results = []
-    for orig_idx, headline in candidates:
-        h_hash = hashlib.md5(headline.encode()).hexdigest()
-        cached = st.session_state["headline_cache"].get(h_hash)
-        if cached:
-            cached["_idx"] = orig_idx
-            results.append(cached)
-        else:
-            to_process.append((orig_idx, headline, h_hash))
-
-    total_new = len(to_process)
-    if total_new == 0:
-        if progress_bar:
-            progress_bar.progress(1.0, text=f"✅ All {len(candidates)} relevant headlines from cache — 0 API calls")
-        return results
-
-    # Step 3: Batch into groups of 5
-    BATCH_SIZE = 5
-    MAX_CALLS = 12  # hard ceiling — never touch the 15/min limit
-    call_count = 0
-    processed = 0
-
-    batches = [to_process[i:i+BATCH_SIZE] for i in range(0, len(to_process), BATCH_SIZE)]
-
-    for batch in batches:
-        if call_count >= MAX_CALLS:
-            # Use keyword engine for remaining headlines — don't risk rate limit
-            if progress_bar:
-                progress_bar.progress(1.0,
-                    text=f"⚙️ {call_count} Gemini calls used — keyword engine handling remaining {len(to_process)-processed}")
-            break
-
-        # Build batch prompt
-        numbered = "\n".join(f"{j+1}. {item[1]}" for j, item in enumerate(batch))
-        today = datetime.now(IST).strftime("%d %b %Y")
-        prompt = f"""You are a senior Indian equity market strategist. Today is {today}.
-
-Analyse these {len(batch)} news headlines for Nifty 50 impact.
-
-For EACH headline return ALL fields:
-- relevant: true/false (TRUE = direct Nifty 50 mechanism: RBI/Fed policy, FII flows, crude/rupee, India macro, constituent earnings, US market moves, tariffs, geopolitical events affecting India)
-- topic: 2-5 word Bloomberg label (NOT the raw headline)
-- sentiment: "Positive" / "Negative" / "Mixed" for Nifty 50
-- impact_level: "🔴 Critical" / "🟠 High" / "🟡 Moderate"
-- weight: integer 5-10
-- logic: 2-3 sentences — specific mechanism, sectors, stock names, numbers from headline. Unique per headline.
-
-Headlines:
-{numbered}
-
-Raw JSON array only, one object per headline:
-[{{"index":1,"relevant":true,"topic":"Crude Oil Spike","sentiment":"Negative","impact_level":"🔴 Critical","weight":9,"logic":"Brent surging 7% raises India import costs. BPCL, ONGC gain on higher realisations but IndiGo faces jet fuel pressure. RBI may delay rate cuts on inflation risk."}}]"""
-
-        raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=1500)
-        call_count += 1
-        processed += len(batch)
-
-        if raw_text:
-            try:
-                clean = re.sub(r"```json|```", "", raw_text).strip()
-                parsed = json.loads(clean)
-                for j, item in enumerate(batch):
-                    orig_idx, headline, h_hash = item
-                    info = next((p for p in parsed if p.get("index") == j + 1), {})
-                    if info:
-                        info["_idx"] = orig_idx
-                        info["_model"] = model_used
-                        results.append(info)
-                        st.session_state["headline_cache"][h_hash] = info
-            except Exception:
-                pass
-
-        if progress_bar:
-            progress_bar.progress(
-                min(processed / max(total_new, 1), 1.0),
-                text=f"🤖 Gemini: {processed}/{total_new} new headlines analysed | {call_count} API calls | Model: {model_used or 'trying...'}"
-            )
-
-        # Rate limit spacing: 5s between batches (12 calls/min max)
-        if call_count < len(batches) and call_count < MAX_CALLS:
-            time.sleep(5)
-
-    if progress_bar:
-        cached_count = len(candidates) - total_new
-        progress_bar.progress(1.0,
-            text=f"✅ Done — {cached_count} from cache + {call_count} new Gemini calls")
-
-    return results
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def gemini_future_cached(gemini_key: str, date_key: str) -> list:
-    """
-    date_key = today's date string — ensures one call per day max for future events.
-    TTL = 30 min. Future events don't change by the minute.
+    One Gemini call for the full 30-day event calendar. Cached 6h.
+    Called after a deliberate 10s pause so rate limit has headroom.
     """
     if not gemini_key:
         return []
-
     today = datetime.now(IST).strftime("%d %b %Y")
-    prompt = f"""You are a senior Indian equity market strategist. Today is {today}.
+    prompt = f"""Senior Nifty 50 strategist. Today: {today}.
 
-List the TOP 8 upcoming events in the next 30 days that will most significantly impact the Nifty 50 index.
-These must be REAL scheduled events — earnings dates, RBI/Fed meetings, macro data releases, policy announcements.
+List the 8 most impactful SCHEDULED events for Nifty 50 in the next 30 days.
+Include: RBI/Fed meetings, major earnings dates (TCS, Infosys, HDFCBANK etc), India CPI/GDP/IIP releases, SEBI events, budget sessions.
 
-For each return:
-- topic: 2-5 word Bloomberg label
-- timing: specific date or range (e.g. "09 Apr 2026")
-- sentiment: "Positive" / "Negative" / "Mixed"
-- impact_level: "🔴 Critical" / "🟠 High" / "🟡 Moderate"
-- weight: 5-10
-- logic: 2-3 sentences — which Nifty stocks/sectors affected, what magnitude of move expected, why.
+Return raw JSON array only:
+[{{
+  "topic": "2-5 word Bloomberg label",
+  "timing": "specific date e.g. 09 Apr 2026",
+  "sentiment": "Positive"/"Negative"/"Mixed",
+  "impact_level": "🔴 Critical"/"🟠 High"/"🟡 Moderate",
+  "weight": 5-10,
+  "logic": "2-3 sentences: which Nifty stocks/sectors, expected move magnitude, why."
+}}]"""
 
-Raw JSON array only:
-[{{"topic":"RBI MPC Decision","timing":"07-09 Apr 2026","sentiment":"Mixed","impact_level":"🔴 Critical","weight":9,"logic":"RBI rate decision directly moves banking heavyweights HDFCBANK, ICICIBANK. A cut could lift Nifty 200+ pts. Market pricing 25bps cut on slowing growth."}}]"""
-
-    raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=2048)
-    if not raw_text:
+    # Deliberate pause before this call so we don't stack on active-events calls
+    time.sleep(10)
+    text, model = call_gemini(prompt, gemini_key, max_tokens=1500)
+    if not text:
         return []
-
     try:
-        clean = re.sub(r"```json|```", "", raw_text).strip()
+        clean = re.sub(r"```json|```", "", text).strip()
         parsed = json.loads(clean)
         for item in parsed:
-            item["_model"] = model_used
+            item["_model"] = model
         return parsed
     except Exception:
         return []
 
-
-# ─── 5. KEYWORD FALLBACK — WHEN GEMINI UNAVAILABLE ───────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def keyword_fallback_analysis(raw_news: tuple) -> list:
+# ─── 6. PROGRESSIVE HEADLINE PROCESSOR ───────────────────────────────────────
+def process_headlines_progressively(
+    raw_news: tuple,
+    gemini_key: str,
+    result_placeholder,
+    status_placeholder
+):
     """
-    Pure Python analysis — zero API calls. Used when Gemini is unavailable.
-    Gives basic topic/sentiment/logic without AI, so users always see something.
+    Process headlines one at a time:
+    - Check session cache first (instant, free)
+    - If not cached: call Gemini, wait CALL_GAP seconds, update display
+    - Render the table after EVERY new result so users see data arriving live
+    - Never sends more than MAX_PER_RUN new calls in one page load
+    - Hard sleep between calls keeps us at ~10 calls/min (under the 15/min limit)
     """
-    # Fetch Nifty 50 constituent list dynamically from Wikipedia
-    nifty_stocks = fetch_nifty50_constituents()
+    CALL_GAP    = 7    # seconds between new Gemini calls → ~8.5 calls/min, safely under 15
+    MAX_PER_RUN = 10   # max new calls per page load; rest served from cache next refresh
 
-    results = []
-    for title, time_str, source in raw_news:
-        t = title.lower()
-
-        # Hard filter — obvious non-market content
-        non_market = ['cricket','ipl','bollywood','movie','film','celebrity',
-                      'wedding','recipe','fashion','horoscope','sports score',
-                      'murder','crime','arrest','accident']
-        if any(k in t for k in non_market):
-            continue
-
-        # Score relevance
-        score = 0
-        if any(k in t for k in ['nifty','sensex','nse','bse','dalal street']): score += 3
-        if any(k in t for k in ['rbi','fed','repo','mpc','monetary','fomc','powell']): score += 3
-        if any(k in t for k in ['fii','fpi','foreign investor','foreign fund']): score += 3
-        if any(k in t for k in ['crude','brent','oil price','wti','petroleum']): score += 2
-        if any(k in t for k in ['rupee','inr','forex','dollar index']): score += 2
-        if any(k in t for k in ['inflation','cpi','wpi','gdp','iip']): score += 2
-        if any(k in t for k in ['tariff','trade war','sanction','geopolit']): score += 2
-        if any(k in t for k in ['war','conflict','strike','missile','iran','ukraine']): score += 2
-        if any(k in t for k in ['earnings','results','q4','q3','quarterly','profit']): score += 2
-        if any(k in t for k in ['gold','silver','comex']): score += 1
-        if any(k in t for k in ['ipo','listing','sebi']): score += 1
-        if any(s.lower() in t for s in nifty_stocks): score += 2
-        if 'india' in t and any(k in t for k in ['market','stock','equity','index']): score += 1
-
-        if score < 2:
-            continue
-
-        # Topic
-        topic = derive_topic(t, title)
-        # Sentiment
-        neg_words = ['crash','fall','drop','decline','slump','weak','loss','sell','tariff',
-                     'war','conflict','crisis','threat','sanction','recession','gap down',
-                     'concern','uncertainty','pressure','negative','fear','risk']
-        pos_words = ['rise','rally','gain','jump','surge','rebound','recover','growth',
-                     'strong','boost','cut','intervention','support','profit','beat','inflow']
-        neg = sum(1 for k in neg_words if k in t)
-        pos = sum(1 for k in pos_words if k in t)
-        sentiment = "Positive" if pos > neg else "Negative" if neg > pos else "Mixed"
-
-        # Impact
-        if score >= 5:
-            impact, weight = "🔴 Critical", 8
-        elif score >= 3:
-            impact, weight = "🟠 High", 6
-        else:
-            impact, weight = "🟡 Moderate", 5
-
-        # Logic
-        logic = derive_logic(t, title, nifty_stocks)
-
-        results.append({
-            "topic": topic, "time": time_str, "source": source,
-            "impact": f"{impact} ({'🟢' if sentiment=='Positive' else '🔴' if sentiment=='Negative' else '🟡'} {sentiment})",
-            "weight": weight, "logic": logic, "_model": "Keyword Engine"
-        })
-
-    return results
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_nifty50_constituents() -> list:
-    """Fetch current Nifty 50 stock names from Wikipedia — no hardcoding."""
-    try:
-        url = "https://en.wikipedia.org/wiki/NIFTY_50"
-        resp = requests.get(url, timeout=10)
-        # Extract company names from the wiki table
-        names = re.findall(r'title="([^"]+)">[^<]+</a>\s*</td>', resp.text)
-        # Filter to likely stock names (short, no spaces or 1-2 words)
-        stocks = [n.lower() for n in names if len(n) < 30 and n[0].isupper()]
-        return list(set(stocks))[:60] if stocks else []
-    except Exception:
-        return []
-
-
-def derive_topic(t: str, title: str) -> str:
-    """Derive a clean topic label from headline text."""
-    if 'iran' in t and any(k in t for k in ['war','strike','threat','conflict','escalat']): return "Iran Strike Threat"
-    if any(k in t for k in ['dow jones','dow futures']): return "Dow Jones Selloff"
-    if any(k in t for k in ['nasdaq']) and any(k in t for k in ['fall','crash','drop']): return "Nasdaq Tech Selloff"
-    if 'trump' in t and any(k in t for k in ['tariff','trade']): return "US Tariff Escalation"
-    if 'trump' in t and 'iran' in t: return "Trump Iran Rhetoric"
-    if 'trump' in t: return "Trump Policy Uncertainty"
-    if any(k in t for k in ['rbi']) and any(k in t for k in ['rate','repo','mpc','policy']): return "RBI Monetary Policy"
-    if any(k in t for k in ['rbi']) and any(k in t for k in ['rupee','ndf','intervention']): return "RBI Currency Intervention"
-    if any(k in t for k in ['rate cut','repo cut']): return "RBI Repo Rate Cut"
-    if any(k in t for k in ['rate hike','hawkish']): return "Rate Hike Signal"
-    if any(k in t for k in ['fed','fomc','powell']): return "US Fed Rate Decision"
-    if any(k in t for k in ['fii','fpi']) and any(k in t for k in ['sell','outflow','exit']): return "FII Selling Surge"
-    if any(k in t for k in ['fii','fpi']) and any(k in t for k in ['buy','inflow']): return "FII Buying Inflow"
-    if any(k in t for k in ['crude','brent','oil price']) and any(k in t for k in ['surge','spike','rise','jump']): return "Crude Oil Price Spike"
-    if any(k in t for k in ['crude','brent','oil price']) and any(k in t for k in ['drop','fall','decline']): return "Crude Oil Price Drop"
-    if any(k in t for k in ['gold','silver','comex']) and any(k in t for k in ['surge','rally','high']): return "Gold Safe-Haven Rally"
-    if any(k in t for k in ['rupee','inr']) and any(k in t for k in ['fall','weak','low','record']): return "Rupee Weakness"
-    if any(k in t for k in ['rupee','inr']) and any(k in t for k in ['rise','rebound','strong']): return "Rupee Recovery"
-    if any(k in t for k in ['inflation','cpi','wpi']): return "India Inflation Data"
-    if any(k in t for k in ['gdp','economic growth']): return "India GDP Data"
-    if any(k in t for k in ['earnings','results','q4','q3','quarterly']): return "Nifty Earnings Report"
-    if any(k in t for k in ['ipo','listing']): return "NSE IPO Event"
-    if any(k in t for k in ['sebi']): return "SEBI Regulatory Action"
-    if any(k in t for k in ['market cap','global cap']): return "India Market Cap Move"
-    if any(k in t for k in ['war','conflict','middle east','geopolit']): return "Geopolitical Risk Event"
-    stopwords = {'the','a','an','in','on','at','for','of','to','is','are','was','by','with','after','and','or','from'}
-    words = [w for w in re.sub(r'[^a-zA-Z0-9 ]','',title).split() if w.lower() not in stopwords]
-    return " ".join(words[:4]) if words else title[:25]
-
-
-def derive_logic(t: str, title: str, stocks: list) -> str:
-    """Derive specific logic from headline text."""
-    matched = [s.title() for s in stocks if s in t][:2]
-    target = ", ".join(matched) if matched else "Nifty heavyweights"
-
-    if any(k in t for k in ['gold','silver','comex']): return f"Precious metal move signals safe-haven demand; equity rotation out of {target} likely."
-    if any(k in t for k in ['dow jones','dow futures','nasdaq']): return f"US market fall triggers overnight FII selling; {target} expected to gap down at NSE open."
-    if 'iran' in t and any(k in t for k in ['war','conflict','strike','threat']): return f"Iran conflict spikes crude oil; BPCL, ONGC gain but aviation and {target} face cost pressure."
-    if any(k in t for k in ['crude','brent','oil price']): return f"Crude move hits India import bill; {target} reprice on fuel cost and inflation impact."
-    if any(k in t for k in ['tariff','trade war']): return f"US tariffs raise global risk-off; FIIs exit emerging markets, {target} under selling pressure."
-    if 'trump' in t: return f"Trump policy uncertainty drives FII caution; {target} vulnerable to risk-off sentiment."
-    if any(k in t for k in ['rbi','mpc','repo']): return f"RBI policy signals affect {target}; market re-prices rate trajectory and banking sector flows."
-    if any(k in t for k in ['fed','fomc','powell']): return f"Fed stance drives dollar/yield; FII flows into {target} react to global rate movement."
-    if any(k in t for k in ['fii','fpi']): return f"FII flow data directly moves {target}; sets overall Nifty 50 direction at open."
-    if any(k in t for k in ['rupee','inr']): return f"Rupee move affects {target}; IT exporters gain on weak INR, importers lose margin."
-    if any(k in t for k in ['inflation','cpi','wpi']): return f"Inflation data shifts RBI rate expectations; {target} reprice on policy outlook change."
-    if any(k in t for k in ['gdp','iip']): return f"GDP/IIP data resets earnings expectations; {target} valuations re-rated by market."
-    if any(k in t for k in ['earnings','results','q4','q3']): return f"{target} earnings beat/miss sets sector tone and near-term Nifty direction."
-    if any(k in t for k in ['war','conflict','geopolit']): return f"Geopolitical risk triggers FII exit from EM; {target} under broad selling pressure."
-    return f"{target} directly in focus; watch for index-level moves at NSE open."
-
-
-# ─── 6. MASTER DATA PIPELINE ─────────────────────────────────────────────────
-def get_active_events(gemini_key: str, news_key: str) -> tuple[pd.DataFrame, str]:
-    """Returns (dataframe, source_label). Always returns something."""
-    raw_news = fetch_raw_news(news_key)
-    if not raw_news:
-        return pd.DataFrame(), "No data"
-
-    # Try Gemini — one headline at a time, rate-limit aware
-    if gemini_key:
-        titles = tuple(item[0] for item in raw_news)
-
-        # Count how many are NOT yet in session cache
-        if "headline_cache" not in st.session_state:
-            st.session_state["headline_cache"] = {}
-        uncached = sum(
-            1 for t in titles
-            if hashlib.md5(t.encode()).hexdigest() not in st.session_state["headline_cache"]
-        )
-
-        # Show progress bar only if there are new headlines to analyse
-        prog = None
-        if uncached > 0:
-            prog = st.progress(0, text=f"🤖 Gemini analysing {uncached} new headlines (0 API calls used so far)...")
-
-        analysis = gemini_analyze_all(titles, gemini_key, progress_bar=prog)
-
-        if prog:
-            prog.empty()
-
-        if analysis:
-            rows = []
-            model_used = set()
-            # Build a map from headline text → analysis result
-            analysis_by_text = {}
-            for a in analysis:
-                # Match by _idx if available, otherwise skip
-                idx = a.get("_idx")
-                if idx is not None and idx < len(raw_news):
-                    analysis_by_text[raw_news[idx][0]] = a
-
-            for title, time_str, source in raw_news:
-                info = analysis_by_text.get(title) or                        st.session_state["headline_cache"].get(hashlib.md5(title.encode()).hexdigest(), {})
-                if not info.get("relevant"): continue
-                weight = info.get("weight", 5)
-                if weight < 5: continue
-                topic = info.get("topic","").strip() or derive_topic(title.lower(), title)
-                sentiment = info.get("sentiment","Mixed")
-                s_icon = "🟢" if sentiment=="Positive" else "🔴" if sentiment=="Negative" else "🟡"
-                if info.get("_model"): model_used.add(info["_model"])
-                rows.append({
-                    "Topic": topic,
-                    "Timing": time_str,
-                    "Impact": f"{info.get('impact_level','🟡 Moderate')} ({s_icon} {sentiment})",
-                    "Weight": weight,
-                    "Logic Behind Impact": info.get("logic","—"),
-                    "Source": source,
-                })
-            if rows:
-                df = pd.DataFrame(rows)
-                rank = {"🔴 Critical":0,"🟠 High":1,"🟡 Moderate":2}
-                df['_s'] = df['Impact'].apply(lambda x: next((v for k,v in rank.items() if k in str(x)),99))
-                df = df.sort_values(['_s','Weight'],ascending=[True,False]).drop(columns=['_s']).reset_index(drop=True)
-                models_str = ", ".join(m for m in model_used if m)
-                cached_count = len(titles) - uncached
-                label = f"Gemini AI ({models_str}) | {cached_count} cached + {uncached} new calls"
-                return df, label
-
-    # Keyword fallback — always works, zero API calls
-    results = keyword_fallback_analysis(raw_news)
-    if not results:
-        return pd.DataFrame(), "No relevant events"
-
-    rows = [{
-        "Topic": r["topic"], "Timing": r["time"],
-        "Impact": r["impact"], "Weight": r["weight"],
-        "Logic Behind Impact": r["logic"], "Source": r["source"],
-    } for r in results]
-    df = pd.DataFrame(rows)
-    rank = {"🔴 Critical":0,"🟠 High":1,"🟡 Moderate":2}
-    df['_s'] = df['Impact'].apply(lambda x: next((v for k,v in rank.items() if k in str(x)),99))
-    df = df.sort_values(['_s','Weight'],ascending=[True,False]).drop(columns=['_s']).reset_index(drop=True)
-    return df, "Keyword Engine (Gemini rate-limited)"
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_future_events(gemini_key: str, news_key: str) -> tuple[pd.DataFrame, str]:
-    date_key = datetime.now(IST).strftime("%Y-%m-%d")
-    events = gemini_future_cached(gemini_key, date_key) if gemini_key else []
-    model_used = events[0].get("_model","Gemini") if events else "—"
-
-    if not events:
-        return pd.DataFrame(), "Gemini unavailable"
+    if "hcache" not in st.session_state:
+        st.session_state["hcache"] = {}
 
     rows = []
-    for e in events:
-        sentiment = e.get("sentiment","Mixed")
-        s_icon = "🟢" if sentiment=="Positive" else "🔴" if sentiment=="Negative" else "🟡"
+    new_calls = 0
+    cached_count = 0
+    total = len(raw_news)
+
+    for i, (title, ts, source) in enumerate(raw_news):
+        h = hashlib.md5(title.encode()).hexdigest()
+
+        # Try session cache
+        info = st.session_state["hcache"].get(h)
+
+        if info is None:
+            # Hard cap on new calls per run
+            if new_calls >= MAX_PER_RUN:
+                status_placeholder.info(
+                    f"⏸ Paused at {MAX_PER_RUN} new calls this run. "
+                    f"{total - i} headlines queued — will process on next refresh (2 min)."
+                )
+                break
+
+            # Wait between calls to stay under 15/min
+            if new_calls > 0:
+                for remaining in range(CALL_GAP, 0, -1):
+                    status_placeholder.info(
+                        f"🤖 Gemini: {i}/{total} headlines | "
+                        f"{new_calls} new calls | {cached_count} from cache | "
+                        f"Next call in {remaining}s..."
+                    )
+                    time.sleep(1)
+
+            # Call Gemini
+            status_placeholder.info(
+                f"🤖 Calling Gemini for headline {i+1}/{total}..."
+            )
+            info = gemini_analyze_one(h, title, gemini_key)
+            st.session_state["hcache"][h] = info  # cache even empty result
+            new_calls += 1
+        else:
+            cached_count += 1
+
+        # Skip irrelevant or empty
+        if not info or not info.get("relevant"):
+            continue
+        weight = info.get("weight", 5)
+        if weight < 5:
+            continue
+
+        topic = info.get("topic", "").strip() or title[:40]
+        sentiment = info.get("sentiment", "Mixed")
+        s_icon = "🟢" if sentiment == "Positive" else "🔴" if sentiment == "Negative" else "🟡"
+
         rows.append({
-            "Topic": e.get("topic","—"),
-            "Timing": e.get("timing","Upcoming"),
-            "Impact": f"{e.get('impact_level','🟡 Moderate')} ({s_icon} {sentiment})",
-            "Weight": e.get("weight",5),
-            "Logic Behind Impact": e.get("logic","—"),
-            "Source": "Gemini AI",
+            "Topic":               topic,
+            "Timing":              ts,
+            "Impact":              f"{info.get('impact_level','🟡 Moderate')} ({s_icon} {sentiment})",
+            "Weight":              weight,
+            "Logic Behind Impact": info.get("logic", "—"),
+            "Source":              source,
         })
 
-    df = pd.DataFrame(rows).drop_duplicates(subset=["Topic"])
-    rank = {"🔴 Critical":0,"🟠 High":1,"🟡 Moderate":2}
-    df['_s'] = df['Impact'].apply(lambda x: next((v for k,v in rank.items() if k in str(x)),99))
-    df = df.sort_values(['_s','Weight'],ascending=[True,False]).drop(columns=['_s']).reset_index(drop=True)
-    return df, f"Gemini AI ({model_used})"
+        # Re-render table after every new row so user sees live updates
+        if rows:
+            rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2}
+            df = pd.DataFrame(rows)
+            df['_s'] = df['Impact'].apply(lambda x: next((v for k, v in rank.items() if k in str(x)), 99))
+            df = df.sort_values(['_s', 'Weight'], ascending=[True, False]).drop(columns=['_s']).reset_index(drop=True)
+            result_placeholder.table(get_styled_table(df))
 
+        status_placeholder.info(
+            f"🤖 {i+1}/{total} headlines processed | "
+            f"{new_calls} new Gemini calls | {cached_count} from cache"
+        )
+
+    # Final status
+    pending = total - (i + 1) if new_calls >= MAX_PER_RUN else 0
+    if pending > 0:
+        status_placeholder.warning(
+            f"✅ {len(rows)} events shown | {cached_count} cached | "
+            f"{new_calls} new calls | ⏳ {pending} headlines queued for next refresh"
+        )
+    else:
+        model_set = set()
+        for _, info in st.session_state["hcache"].items():
+            if info and info.get("_model"):
+                model_set.add(info["_model"])
+        status_placeholder.success(
+            f"✅ {len(rows)} relevant events | {cached_count} cached | "
+            f"{new_calls} new calls | Models: {', '.join(model_set) or 'Gemini'}"
+        )
+
+    return rows
 
 # ─── 7. STYLED TABLE ─────────────────────────────────────────────────────────
-def get_styled_table(df: pd.DataFrame) -> pd.DataFrame.style:
-    cols = ["Topic","Timing","Impact","Weight","Logic Behind Impact","Source"]
+def get_styled_table(df: pd.DataFrame):
+    cols = ["Topic", "Timing", "Impact", "Weight", "Logic Behind Impact", "Source"]
     cols = [c for c in cols if c in df.columns]
+
     def color_impact(v):
         if 'Critical' in str(v): return 'color:red;font-weight:bold;'
         if 'High'     in str(v): return 'color:orange;font-weight:bold;'
         if 'Moderate' in str(v): return 'color:goldenrod;font-weight:bold;'
         return ''
-    return df[cols].style\
-        .map(color_impact, subset=['Impact'])\
-        .map(lambda _: 'font-weight:bold;', subset=['Topic'])
 
+    return df[cols].style \
+        .map(color_impact, subset=['Impact']) \
+        .map(lambda _: 'font-weight:bold;', subset=['Topic'])
 
 # ─── 8. UI ────────────────────────────────────────────────────────────────────
 st.title("🏛️ Nifty 50: Strategic Event Monitor")
@@ -646,43 +331,96 @@ st.title("🏛️ Nifty 50: Strategic Event Monitor")
 gemini_key = st.secrets.get("gemini_api_key", "")
 news_key   = st.secrets.get("news_api_key", "")
 
-# Active events
-with st.spinner("Fetching & analysing live Nifty 50 events..."):
-    df_all, source_label = get_active_events(gemini_key, news_key)
-
-# Sentiment Gauge
-today_str = datetime.now(IST).strftime("%d %b")
-today_df = df_all[df_all['Timing'].str.contains(today_str, na=False)] if not df_all.empty else pd.DataFrame()
-today_score = int(today_df["Weight"].sum()) if not today_df.empty else 0
-gauge_color = "red" if today_score > 30 else "orange" if today_score > 15 else "green"
-st.subheader(f"Today's Market Intensity: :{gauge_color}[{today_score} / 50]")
-st.progress(min(today_score / 50, 1.0))
+if not gemini_key:
+    st.error(
+        "⚠️ Gemini API key not set. "
+        "Add `gemini_api_key` to Streamlit Secrets. "
+        "Free key → https://aistudio.google.com/app/apikey"
+    )
+    st.stop()
 
 now_ist = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
-st.info(f"📍 Bengaluru | Engine: **{source_label}** | {now_ist} | Auto-Refresh: 60s")
+st.info(f"📍 Bengaluru | Gemini AI | {now_ist} | Auto-Refresh: 2 min")
 
+# ── FUTURE EVENTS (fetched first — just 1 Gemini call, 6h cache) ─────────────
+st.header("📅 Upcoming Events — Next 30 Days")
+fut_status = st.empty()
+fut_table  = st.empty()
+
+date_key = datetime.now(IST).strftime("%Y-%m-%d")
+
+# Check if future events already in cache before calling
+fut_status.info("📅 Loading upcoming events calendar...")
+future_events = gemini_future(gemini_key, date_key)
+
+if future_events:
+    fut_rows = []
+    model_f = future_events[0].get("_model", "Gemini")
+    for e in future_events:
+        sentiment = e.get("sentiment", "Mixed")
+        s_icon = "🟢" if sentiment == "Positive" else "🔴" if sentiment == "Negative" else "🟡"
+        fut_rows.append({
+            "Topic":               e.get("topic", "—"),
+            "Timing":              e.get("timing", "Upcoming"),
+            "Impact":              f"{e.get('impact_level','🟡 Moderate')} ({s_icon} {sentiment})",
+            "Weight":              e.get("weight", 5),
+            "Logic Behind Impact": e.get("logic", "—"),
+            "Source":              "Gemini AI",
+        })
+    df_fut = pd.DataFrame(fut_rows).drop_duplicates(subset=["Topic"])
+    rank = {"🔴 Critical": 0, "🟠 High": 1, "🟡 Moderate": 2}
+    df_fut['_s'] = df_fut['Impact'].apply(lambda x: next((v for k, v in rank.items() if k in str(x)), 99))
+    df_fut = df_fut.sort_values(['_s', 'Weight'], ascending=[True, False]).drop(columns=['_s']).reset_index(drop=True)
+    fut_table.table(get_styled_table(df_fut))
+    fut_status.success(f"✅ {len(fut_rows)} upcoming events | Model: {model_f} | Cached 6h")
+else:
+    fut_status.warning("⏳ Upcoming events loading — Gemini processing, will appear on next refresh.")
+
+st.markdown("---")
+
+# ── ACTIVE EVENTS (progressive, rate-limit aware) ────────────────────────────
 st.header("🔴 Active & Recent Events")
-if not df_all.empty:
-    st.caption(f"{len(df_all)} events | Engine: {source_label}")
-    st.table(get_styled_table(df_all))
-else:
-    st.warning("No relevant events loaded. Check API keys or internet connection.")
 
-# Future events
+with st.spinner("Fetching live headlines from RSS & NewsAPI..."):
+    raw_news = fetch_raw_news(news_key)
+
+total_raw = len(raw_news)
+cached_already = sum(
+    1 for (title, _, _) in raw_news
+    if st.session_state.get("hcache", {}).get(hashlib.md5(title.encode()).hexdigest())
+)
+new_needed = total_raw - cached_already
+
+st.caption(
+    f"{total_raw} headlines fetched | "
+    f"{cached_already} already cached (instant) | "
+    f"{new_needed} new → Gemini (7s apart, max 10/run)"
+)
+
+# Placeholders for live updates
+act_status = st.empty()
+act_table  = st.empty()
+
+process_headlines_progressively(raw_news, gemini_key, act_table, act_status)
+
+# ── SENTIMENT GAUGE ───────────────────────────────────────────────────────────
 st.markdown("---")
-st.header("📅 Upcoming Events (Next 30 Days)")
-with st.spinner("Building financial calendar outlook..."):
-    df_future, future_label = get_future_events(gemini_key, news_key)
+st.header("📊 Today's Market Intensity")
 
-if not df_future.empty:
-    st.caption(f"Source: {future_label}")
-    st.table(get_styled_table(df_future))
-else:
-    st.info("Future events unavailable — Gemini may be rate-limited. Refreshes automatically.")
+today_str = datetime.now(IST).strftime("%d %b")
+hcache = st.session_state.get("hcache", {})
+today_weight = 0
+for (title, ts, _) in raw_news:
+    if today_str in ts:
+        h = hashlib.md5(title.encode()).hexdigest()
+        info = hcache.get(h, {})
+        if info and info.get("relevant"):
+            today_weight += info.get("weight", 0)
 
-# Market Guide
-st.markdown("---")
-st.header("📖 Market Intensity Guide")
+gauge_color = "red" if today_weight > 30 else "orange" if today_weight > 15 else "green"
+st.subheader(f"Intensity Score: :{gauge_color}[{today_weight} / 50]")
+st.progress(min(today_weight / 50, 1.0))
+
 c1, c2 = st.columns(2)
 with c1:
     st.write("**0–15:** Sideways; narrow range.")
@@ -691,83 +429,90 @@ with c2:
     st.write("**31–45:** High volatility; 300+ pt gaps.")
     st.write("**46–50:** Black Swan; circuit breaker risk.")
 
-# ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
 st.sidebar.header("🔧 System Status")
 
-# Engine status
-st.sidebar.subheader("🤖 Analysis Engine")
-if gemini_key:
-    st.sidebar.success("✅ Gemini AI (free tier)")
-    st.sidebar.write("**Fallback chain:**")
-    st.sidebar.write("1. gemini-2.0-flash")
-    st.sidebar.write("2. gemini-1.5-flash-8b")
-    st.sidebar.write("3. gemini-1.0-pro")
-    st.sidebar.write("4. ⚙️ Keyword Engine (if all rate-limited)")
-    st.sidebar.write("Cache: 30 min — Gemini called max ~48×/day")
-else:
-    st.sidebar.warning("⚠️ Gemini key missing → Keyword Engine active")
-    st.sidebar.write("Add `gemini_api_key` → https://aistudio.google.com/app/apikey")
+st.sidebar.subheader("🤖 Gemini AI")
+st.sidebar.success("✅ Active (free tier)")
+st.sidebar.write("**Model fallback:** gemini-2.0-flash → gemini-1.5-flash-8b → gemini-1.0-pro")
+st.sidebar.write("**Rate strategy:** 1 headline/7s = ~8 calls/min (limit: 15/min)")
+st.sidebar.write("**Per headline:** cached 24h — never re-called for same headline")
+st.sidebar.write("**Future events:** cached 6h — 1 call per 6 hours")
 
+hcache_size = len(st.session_state.get("hcache", {}))
+st.sidebar.write(f"**Session cache:** {hcache_size} headlines stored")
+
+if st.sidebar.button("🗑️ Clear Headline Cache"):
+    st.session_state["hcache"] = {}
+    st.rerun()
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("📰 NewsAPI")
 if news_key:
     st.sidebar.success("✅ Connected (7-day history)")
 else:
     st.sidebar.warning("⚠️ Not set — RSS only")
+    st.sidebar.write("Add `news_api_key` → https://newsapi.org/register")
 
 st.sidebar.subheader("⚖️ Weight Guide")
 st.sidebar.write("**9–10** Critical: 200+ pt swing")
 st.sidebar.write("**7–8** High: 100–200 pt swing")
 st.sidebar.write("**5–6** Moderate: stock-level move")
 
-# Diagnostics
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔬 Diagnostics")
-if st.sidebar.button("▶ Run Health Check"):
-    st.sidebar.write("**Gemini AI:**")
-    if not gemini_key:
-        st.sidebar.error("❌ Key missing")
-    else:
-        active_model = None
-        for model in FREE_MODELS:
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
-                r = requests.post(url, json={"contents":[{"parts":[{"text":"Say OK"}]}],"generationConfig":{"maxOutputTokens":5}}, timeout=10)
-                if r.status_code == 200:
-                    active_model = model
-                    break
-                elif r.status_code == 429:
-                    st.sidebar.info(f"`{model}` rate limited → trying next...")
-                    time.sleep(1)
-            except Exception:
-                continue
-        if active_model:
-            st.sidebar.success(f"✅ Active on `{active_model}`")
-        else:
-            st.sidebar.warning("⚠️ All models rate-limited → Keyword Engine in use")
-
-    st.sidebar.write("**NewsAPI:**")
-    if not news_key:
-        st.sidebar.warning("⚠️ Not set")
-    else:
+st.sidebar.subheader("🔬 API Health Check")
+if st.sidebar.button("▶ Run Diagnostics"):
+    active_model = None
+    for model in FREE_MODELS:
         try:
-            r = requests.get(f"https://newsapi.org/v2/everything?q=Nifty&pageSize=1&apiKey={news_key}", timeout=10)
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent?key={gemini_key}"
+            )
+            r = requests.post(
+                url,
+                json={"contents": [{"parts": [{"text": "Say OK"}]}],
+                      "generationConfig": {"maxOutputTokens": 5}},
+                timeout=10
+            )
+            if r.status_code == 200:
+                active_model = model
+                break
+            elif r.status_code == 429:
+                st.sidebar.info(f"`{model}` rate limited → next model...")
+                time.sleep(2)
+        except Exception:
+            continue
+
+    if active_model:
+        st.sidebar.success(f"✅ Gemini active on `{active_model}`")
+    else:
+        st.sidebar.warning("⚠️ All models rate-limited — wait 60s")
+
+    if news_key:
+        try:
+            r = requests.get(
+                f"https://newsapi.org/v2/everything?q=Nifty&pageSize=1&apiKey={news_key}",
+                timeout=10
+            )
             d = r.json()
             if r.status_code == 200 and d.get("status") == "ok":
-                st.sidebar.success(f"✅ OK — {d.get('totalResults',0)} results")
+                st.sidebar.success(f"✅ NewsAPI OK — {d.get('totalResults', 0)} results")
             else:
-                st.sidebar.error(f"❌ {r.status_code}: {d.get('message','')}")
+                st.sidebar.error(f"❌ NewsAPI {r.status_code}: {d.get('message', '')}")
         except Exception as e:
             st.sidebar.error(f"❌ {e}")
 
-    st.sidebar.write("**RSS Feeds:**")
     ok, fail = 0, []
     for name, url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(url)
-            if feed.entries: ok += 1
-            else: fail.append(name)
+            if feed.entries:
+                ok += 1
+            else:
+                fail.append(name)
         except Exception:
             fail.append(name)
-    st.sidebar.success(f"✅ {ok}/{len(RSS_FEEDS)} feeds live")
+    st.sidebar.success(f"✅ {ok}/{len(RSS_FEEDS)} RSS feeds live")
     if fail:
         st.sidebar.warning(f"⚠️ Failed: {', '.join(fail)}")
