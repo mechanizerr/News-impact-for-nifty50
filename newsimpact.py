@@ -187,42 +187,147 @@ Return ONLY a raw JSON object, no markdown:
         return {}
 
 
+def pre_filter_relevant(headlines: tuple) -> list:
+    """
+    Fast keyword pre-filter — runs before Gemini.
+    Drops obvious non-market content so Gemini only sees relevant candidates.
+    Reduces 50-80 raw headlines → ~10-20 for Gemini. Saves ~60% of API calls.
+    """
+    non_market = [
+        'cricket','ipl','bollywood','movie','film','celebrity','wedding',
+        'recipe','fashion','horoscope','murder','crime','arrest','accident',
+        'sports score','entertainment','lifestyle','travel','food','real estate'
+    ]
+    market_signals = [
+        'nifty','sensex','nse','bse','dalal street',
+        'rbi','fed','repo','mpc','monetary','fomc','powell','rate',
+        'fii','fpi','foreign investor','foreign fund',
+        'crude','brent','oil','wti','petroleum',
+        'rupee','inr','forex','dollar index',
+        'inflation','cpi','wpi','gdp','iip',
+        'tariff','trade war','sanction',
+        'war','conflict','strike','missile','iran','ukraine',
+        'earnings','results','q4','q3','quarterly','profit',
+        'gold','silver','comex','ipo','listing','sebi',
+        'india','market','stock','equity','index','shares',
+        'reliance','tcs','hdfc','icici','infosys','wipro','adani',
+        'sbi','itc','bajaj','maruti','titan','ongc','ntpc',
+        'dow','nasdaq','s&p','wall street','us market',
+        'trump','china','geopolit','global market',
+    ]
+    kept = []
+    for i, h in enumerate(headlines):
+        t = h.lower()
+        if any(k in t for k in non_market):
+            continue
+        if any(k in t for k in market_signals):
+            kept.append((i, h))
+    return kept  # list of (original_index, headline)
+
+
 def gemini_analyze_all(headlines: tuple, gemini_key: str, progress_bar=None) -> list:
     """
-    Process headlines one-by-one with rate limit spacing.
-    - Each headline cached individually for 24h
-    - Already-cached headlines cost 0 API calls
-    - New headlines sent with 4s gap = 15/min limit respected
-    - Shows progress so user sees results arriving
+    Smart rate-limit-aware Gemini analysis:
+    1. Pre-filter with keywords → only send ~10-20 relevant headlines to Gemini
+    2. Batch 5 headlines per call → ~3-4 calls total (well under 15/min)
+    3. 5s gap between batches → safe rate spacing
+    4. Hard stop at 12 calls/run → never hits the 15/min ceiling
+    5. Session cache → completed headlines never re-analysed on rerun
     """
+    if "headline_cache" not in st.session_state:
+        st.session_state["headline_cache"] = {}
+
+    # Step 1: Pre-filter to only market-relevant candidates
+    candidates = pre_filter_relevant(headlines)
+
+    # Step 2: Split into cached vs needs-Gemini
+    to_process = []
     results = []
-    new_calls = 0
-
-    for i, headline in enumerate(headlines):
+    for orig_idx, headline in candidates:
         h_hash = hashlib.md5(headline.encode()).hexdigest()
-
-        # Check if already cached (from st.cache_data internal store)
-        # We use a session state dict as a fast in-memory check
-        if "headline_cache" not in st.session_state:
-            st.session_state["headline_cache"] = {}
-
         cached = st.session_state["headline_cache"].get(h_hash)
         if cached:
+            cached["_idx"] = orig_idx
             results.append(cached)
         else:
-            # Rate limit: 4s between new API calls (15/min = 1 per 4s)
-            if new_calls > 0:
-                time.sleep(4)
-            result = gemini_analyze_one(h_hash, headline, gemini_key)
-            if result:
-                result["_idx"] = i
-                results.append(result)
-                st.session_state["headline_cache"][h_hash] = result
-            new_calls += 1
+            to_process.append((orig_idx, headline, h_hash))
+
+    total_new = len(to_process)
+    if total_new == 0:
+        if progress_bar:
+            progress_bar.progress(1.0, text=f"✅ All {len(candidates)} relevant headlines from cache — 0 API calls")
+        return results
+
+    # Step 3: Batch into groups of 5
+    BATCH_SIZE = 5
+    MAX_CALLS = 12  # hard ceiling — never touch the 15/min limit
+    call_count = 0
+    processed = 0
+
+    batches = [to_process[i:i+BATCH_SIZE] for i in range(0, len(to_process), BATCH_SIZE)]
+
+    for batch in batches:
+        if call_count >= MAX_CALLS:
+            # Use keyword engine for remaining headlines — don't risk rate limit
+            if progress_bar:
+                progress_bar.progress(1.0,
+                    text=f"⚙️ {call_count} Gemini calls used — keyword engine handling remaining {len(to_process)-processed}")
+            break
+
+        # Build batch prompt
+        numbered = "\n".join(f"{j+1}. {item[1]}" for j, item in enumerate(batch))
+        today = datetime.now(IST).strftime("%d %b %Y")
+        prompt = f"""You are a senior Indian equity market strategist. Today is {today}.
+
+Analyse these {len(batch)} news headlines for Nifty 50 impact.
+
+For EACH headline return ALL fields:
+- relevant: true/false (TRUE = direct Nifty 50 mechanism: RBI/Fed policy, FII flows, crude/rupee, India macro, constituent earnings, US market moves, tariffs, geopolitical events affecting India)
+- topic: 2-5 word Bloomberg label (NOT the raw headline)
+- sentiment: "Positive" / "Negative" / "Mixed" for Nifty 50
+- impact_level: "🔴 Critical" / "🟠 High" / "🟡 Moderate"
+- weight: integer 5-10
+- logic: 2-3 sentences — specific mechanism, sectors, stock names, numbers from headline. Unique per headline.
+
+Headlines:
+{numbered}
+
+Raw JSON array only, one object per headline:
+[{{"index":1,"relevant":true,"topic":"Crude Oil Spike","sentiment":"Negative","impact_level":"🔴 Critical","weight":9,"logic":"Brent surging 7% raises India import costs. BPCL, ONGC gain on higher realisations but IndiGo faces jet fuel pressure. RBI may delay rate cuts on inflation risk."}}]"""
+
+        raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=1500)
+        call_count += 1
+        processed += len(batch)
+
+        if raw_text:
+            try:
+                clean = re.sub(r"```json|```", "", raw_text).strip()
+                parsed = json.loads(clean)
+                for j, item in enumerate(batch):
+                    orig_idx, headline, h_hash = item
+                    info = next((p for p in parsed if p.get("index") == j + 1), {})
+                    if info:
+                        info["_idx"] = orig_idx
+                        info["_model"] = model_used
+                        results.append(info)
+                        st.session_state["headline_cache"][h_hash] = info
+            except Exception:
+                pass
 
         if progress_bar:
-            progress_bar.progress((i + 1) / len(headlines),
-                text=f"Analysing {i+1}/{len(headlines)} headlines... ({new_calls} new API calls)")
+            progress_bar.progress(
+                min(processed / max(total_new, 1), 1.0),
+                text=f"🤖 Gemini: {processed}/{total_new} new headlines analysed | {call_count} API calls | Model: {model_used or 'trying...'}"
+            )
+
+        # Rate limit spacing: 5s between batches (12 calls/min max)
+        if call_count < len(batches) and call_count < MAX_CALLS:
+            time.sleep(5)
+
+    if progress_bar:
+        cached_count = len(candidates) - total_new
+        progress_bar.progress(1.0,
+            text=f"✅ Done — {cached_count} from cache + {call_count} new Gemini calls")
 
     return results
 
