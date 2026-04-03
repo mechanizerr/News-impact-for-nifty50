@@ -72,33 +72,41 @@ Respond ONLY with a raw JSON array. No markdown, no explanation, no preamble:
   {{"index": 2, "relevant": false, "topic": "N/A", "sentiment": "Mixed", "impact_level": "🟡 Moderate", "weight": 3, "logic": "Not relevant to Nifty 50."}}
 ]"""
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={gemini_key}"
-    )
+    # Free Gemini model fallback chain — tries each model if previous is rate-limited
+    FREE_MODELS = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.0-pro",
+    ]
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096}
     }
 
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, json=payload, timeout=40)
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            if resp.status_code != 200:
-                return []
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            raw = re.sub(r"```json|```", "", raw).strip()
-            parsed = json.loads(raw)
-            # Reject if Gemini returned duplicate logic (templated fallback)
-            logics = [item.get("logic", "") for item in parsed if item.get("relevant")]
-            if logics and Counter(logics).most_common(1)[0][1] > len(logics) * 0.4:
-                return []
-            return parsed
-        except Exception:
-            continue
+    for model in FREE_MODELS:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={gemini_key}"
+        )
+        for attempt in range(2):  # 2 retries per model before trying next
+            try:
+                resp = requests.post(url, json=payload, timeout=40)
+                if resp.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue  # retry same model once, then fall to next
+                if resp.status_code == 404:
+                    break  # model not available, skip to next
+                if resp.status_code != 200:
+                    break
+                raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                raw = re.sub(r"```json|```", "", raw).strip()
+                parsed = json.loads(raw)
+                logics = [item.get("logic", "") for item in parsed if item.get("relevant")]
+                if logics and Counter(logics).most_common(1)[0][1] > len(logics) * 0.4:
+                    break  # templated output, try next model
+                return parsed  # success
+            except Exception:
+                break  # parse/connection error, try next model
     return []
 
 
@@ -130,28 +138,36 @@ Return ONLY a raw JSON array, no markdown:
   {{"topic": "RBI MPC Rate Decision", "timing": "07-09 Apr 2026", "sentiment": "Mixed", "impact_level": "🔴 Critical", "weight": 9, "logic": "RBI's first meeting of FY27 will set repo rate. A cut would rally HDFCBANK, ICICIBANK 3-5%. A hold keeps markets flat. All eyes on RBI governor's tone on inflation."}}
 ]"""
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={gemini_key}"
-    )
+    FREE_MODELS = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.0-pro",
+    ]
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
     }
 
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, json=payload, timeout=40)
-            if resp.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            if resp.status_code != 200:
-                return []
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-            raw = re.sub(r"```json|```", "", raw).strip()
-            return json.loads(raw)
-        except Exception:
-            continue
+    for model in FREE_MODELS:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={gemini_key}"
+        )
+        for attempt in range(2):
+            try:
+                resp = requests.post(url, json=payload, timeout=40)
+                if resp.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue
+                if resp.status_code in (404, 400):
+                    break
+                if resp.status_code != 200:
+                    break
+                raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                raw = re.sub(r"```json|```", "", raw).strip()
+                return json.loads(raw)
+            except Exception:
+                break
     return []
 
 
@@ -452,8 +468,9 @@ st.sidebar.header("🔧 System Status")
 
 st.sidebar.subheader("🤖 Gemini AI")
 if has_gemini:
-    st.sidebar.success(f"✅ Active — gemini-2.0-flash (free tier)")
-    st.sidebar.write("15 req/min · 1,500 req/day · Results cached 5 min")
+    st.sidebar.success(f"✅ Active — free tier")
+    st.sidebar.write("**Fallback chain:** gemini-2.0-flash → gemini-1.5-flash-8b → gemini-1.0-pro")
+    st.sidebar.write("Auto-switches model if rate limited · Results cached 5 min")
 else:
     st.sidebar.error("❌ Key missing")
     st.sidebar.write("Add `gemini_api_key` → https://aistudio.google.com/app/apikey")
@@ -494,20 +511,32 @@ if st.sidebar.button("▶ Run Diagnostics"):
                     "contents": [{"parts": [{"text": "Say OK"}]}],
                     "generationConfig": {"maxOutputTokens": 5}
                 }
-                r = None
-                for attempt in range(3):
-                    r = requests.post(test_url, json=test_payload, timeout=15)
-                    if r.status_code == 429:
-                        st.sidebar.info(f"Rate limited, retrying ({attempt+1}/3)...")
-                        time.sleep(2 ** attempt)
-                        continue
-                    break
-            if r and r.status_code == 200:
-                st.sidebar.success(f"✅ Gemini responding (HTTP 200)")
+                DIAG_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.0-pro"]
+                r, active_model = None, None
+                for model in DIAG_MODELS:
+                    test_url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{model}:generateContent?key={gemini_key}"
+                    )
+                    for attempt in range(2):
+                        r = requests.post(test_url, json=test_payload, timeout=15)
+                        if r.status_code == 429:
+                            st.sidebar.info(f"`{model}` rate limited, trying next model...")
+                            time.sleep(1)
+                            break
+                        if r.status_code == 404:
+                            break
+                        if r.status_code == 200:
+                            active_model = model
+                            break
+                    if active_model:
+                        break
+            if active_model:
+                st.sidebar.success(f"✅ Responding on `{active_model}`")
             elif r and r.status_code == 429:
-                st.sidebar.warning("⚠️ Rate limited (429) — wait 60s")
+                st.sidebar.warning("⚠️ All 3 free models rate limited — wait 60s")
             elif r and r.status_code == 403:
-                st.sidebar.error("❌ Invalid key (403)")
+                st.sidebar.error("❌ Invalid key (403) — check your API key")
             else:
                 st.sidebar.error(f"❌ HTTP {r.status_code if r else 'timeout'}")
                 if r: st.sidebar.code(str(r.json()))
