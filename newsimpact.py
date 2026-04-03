@@ -134,60 +134,97 @@ def call_gemini(prompt: str, gemini_key: str, max_tokens: int = 4096) -> str | N
 
 
 # ─── 4. GEMINI ANALYSIS — CACHED ON CONTENT HASH ─────────────────────────────
-@st.cache_data(ttl=1800, show_spinner=False)  # 30 min cache — stable across refreshes
-def gemini_analyze_cached(headlines_hash: str, headlines: tuple, gemini_key: str) -> list:
+@st.cache_data(ttl=86400, show_spinner=False)  # 24h cache per headline
+def gemini_analyze_one(headline_hash: str, headline: str, gemini_key: str) -> dict:
     """
-    Cache key = content hash of headlines, not the raw list.
-    This means same headlines across multiple refreshes = ONE Gemini call, not many.
-    TTL = 30 min so Gemini is called at most ~48 times/day total.
+    Analyse ONE headline per Gemini call.
+    - Cache key = hash of the headline text → same headline never re-analysed
+    - 24h TTL → each unique headline costs exactly 1 Gemini call ever
+    - 1 headline = tiny prompt = fast response, best quality, no batching waste
     """
-    if not headlines or not gemini_key:
-        return []
+    if not headline or not gemini_key:
+        return {}
 
-    numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines))
     today = datetime.now(IST).strftime("%d %b %Y")
-
     prompt = f"""You are a senior Indian equity market strategist covering Nifty 50. Today is {today}.
 
-Analyse each raw news headline. For EACH return ALL fields:
+Analyse this ONE news headline and return a single JSON object (not an array).
 
-1. relevant (true/false) — Does this headline have a DIRECT mechanism to move Nifty 50?
-   TRUE: RBI/Fed policy, FII flows, crude oil, rupee, India macro data, constituent earnings, US market moves, tariff wars, geopolitical events affecting India oil/exports, SEBI actions, major NSE IPOs.
-   FALSE: cricket, IPL, Bollywood, crime, food, travel, real estate, foreign company news with no India angle.
+Headline: {headline}
 
-2. topic — 2-5 word Bloomberg terminal label. NOT the raw headline. Synthesize cleanly.
-   Examples: "RBI Repo Rate Cut", "Crude Oil Spike", "US Tariff Escalation", "FII Selling Surge", "Dow Jones Crash", "IT Sector Earnings", "Rupee Weakness", "Gold Safe-Haven Rally"
+Return these fields:
+- relevant: true/false — Does this have a DIRECT mechanism to move Nifty 50?
+  TRUE: RBI/Fed policy, FII flows, crude oil/rupee, India macro (CPI/GDP/IIP/WPI), Nifty constituent earnings, US market moves, tariff wars hitting India, geopolitical events affecting India oil/exports, SEBI actions, major NSE IPOs.
+  FALSE: cricket, IPL, Bollywood, crime, lifestyle, real estate, foreign company news with zero India exposure.
 
-3. sentiment — "Positive" / "Negative" / "Mixed" for Nifty 50
+- topic: 2-5 word Bloomberg terminal label. NOT the raw headline. Clean synthesis.
+  Examples: "RBI Repo Rate Cut", "Crude Oil Spike", "FII Selling Surge", "Dow Jones Crash", "US Tariff Escalation", "IT Sector Earnings", "Rupee Weakness", "Gold Rally"
 
-4. impact_level — "🔴 Critical" / "🟠 High" / "🟡 Moderate"
+- sentiment: "Positive" / "Negative" / "Mixed" for Nifty 50 direction
 
-5. weight — integer 5–10
+- impact_level: "🔴 Critical" / "🟠 High" / "🟡 Moderate"
+  Critical = 200+ pt index swing expected
+  High = 100-200 pt sector move
+  Moderate = stock-specific nudge
 
-6. logic — 2-3 sentences. Specific mechanism, sectors, stock names, numbers from the headline. Unique per headline — never repeat same text.
+- weight: integer 5-10
 
-Headlines:
-{numbered}
+- logic: 2-3 sentences. Explain the SPECIFIC mechanism — name affected sectors, Nifty stocks, and use any numbers mentioned in the headline. Be precise and unique.
 
-Raw JSON array only — no markdown:
-[{{"index":1,"relevant":true,"topic":"Topic Here","sentiment":"Negative","impact_level":"🔴 Critical","weight":9,"logic":"Specific logic here."}}]"""
+Return ONLY a raw JSON object, no markdown:
+{{"relevant":true,"topic":"Crude Oil Spike","sentiment":"Negative","impact_level":"🔴 Critical","weight":9,"logic":"Brent surging 7% raises India import costs directly. BPCL and ONGC gain on higher realisations but IndiGo faces jet fuel cost pressure. RBI may delay rate cuts due to inflation risk."}}"""
 
-    raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=4096)
+    raw_text, model_used = call_gemini(prompt, gemini_key, max_tokens=400)
     if not raw_text:
-        return []
+        return {}
 
     try:
         clean = re.sub(r"```json|```", "", raw_text).strip()
-        parsed = json.loads(clean)
-        logics = [item.get("logic", "") for item in parsed if item.get("relevant")]
-        if logics and Counter(logics).most_common(1)[0][1] > len(logics) * 0.4:
-            return []  # templated output, reject
-        # Tag which model was used
-        for item in parsed:
-            item["_model"] = model_used
-        return parsed
+        result = json.loads(clean)
+        result["_model"] = model_used
+        return result
     except Exception:
-        return []
+        return {}
+
+
+def gemini_analyze_all(headlines: tuple, gemini_key: str, progress_bar=None) -> list:
+    """
+    Process headlines one-by-one with rate limit spacing.
+    - Each headline cached individually for 24h
+    - Already-cached headlines cost 0 API calls
+    - New headlines sent with 4s gap = 15/min limit respected
+    - Shows progress so user sees results arriving
+    """
+    results = []
+    new_calls = 0
+
+    for i, headline in enumerate(headlines):
+        h_hash = hashlib.md5(headline.encode()).hexdigest()
+
+        # Check if already cached (from st.cache_data internal store)
+        # We use a session state dict as a fast in-memory check
+        if "headline_cache" not in st.session_state:
+            st.session_state["headline_cache"] = {}
+
+        cached = st.session_state["headline_cache"].get(h_hash)
+        if cached:
+            results.append(cached)
+        else:
+            # Rate limit: 4s between new API calls (15/min = 1 per 4s)
+            if new_calls > 0:
+                time.sleep(4)
+            result = gemini_analyze_one(h_hash, headline, gemini_key)
+            if result:
+                result["_idx"] = i
+                results.append(result)
+                st.session_state["headline_cache"][h_hash] = result
+            new_calls += 1
+
+        if progress_bar:
+            progress_bar.progress((i + 1) / len(headlines),
+                text=f"Analysing {i+1}/{len(headlines)} headlines... ({new_calls} new API calls)")
+
+    return results
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -372,32 +409,54 @@ def derive_logic(t: str, title: str, stocks: list) -> str:
 
 
 # ─── 6. MASTER DATA PIPELINE ─────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
 def get_active_events(gemini_key: str, news_key: str) -> tuple[pd.DataFrame, str]:
     """Returns (dataframe, source_label). Always returns something."""
     raw_news = fetch_raw_news(news_key)
     if not raw_news:
         return pd.DataFrame(), "No data"
 
-    # Try Gemini first
+    # Try Gemini — one headline at a time, rate-limit aware
     if gemini_key:
-        # Stable hash of headline content → cache key doesn't change between refreshes
-        content_hash = hashlib.md5(str(raw_news).encode()).hexdigest()
         titles = tuple(item[0] for item in raw_news)
-        analysis = gemini_analyze_cached(content_hash, titles, gemini_key)
+
+        # Count how many are NOT yet in session cache
+        if "headline_cache" not in st.session_state:
+            st.session_state["headline_cache"] = {}
+        uncached = sum(
+            1 for t in titles
+            if hashlib.md5(t.encode()).hexdigest() not in st.session_state["headline_cache"]
+        )
+
+        # Show progress bar only if there are new headlines to analyse
+        prog = None
+        if uncached > 0:
+            prog = st.progress(0, text=f"🤖 Gemini analysing {uncached} new headlines (0 API calls used so far)...")
+
+        analysis = gemini_analyze_all(titles, gemini_key, progress_bar=prog)
+
+        if prog:
+            prog.empty()
 
         if analysis:
             rows = []
-            model_used = None
-            for idx, (title, time_str, source) in enumerate(raw_news):
-                info = next((a for a in analysis if a.get("index") == idx + 1), {})
+            model_used = set()
+            # Build a map from headline text → analysis result
+            analysis_by_text = {}
+            for a in analysis:
+                # Match by _idx if available, otherwise skip
+                idx = a.get("_idx")
+                if idx is not None and idx < len(raw_news):
+                    analysis_by_text[raw_news[idx][0]] = a
+
+            for title, time_str, source in raw_news:
+                info = analysis_by_text.get(title) or                        st.session_state["headline_cache"].get(hashlib.md5(title.encode()).hexdigest(), {})
                 if not info.get("relevant"): continue
                 weight = info.get("weight", 5)
                 if weight < 5: continue
                 topic = info.get("topic","").strip() or derive_topic(title.lower(), title)
                 sentiment = info.get("sentiment","Mixed")
                 s_icon = "🟢" if sentiment=="Positive" else "🔴" if sentiment=="Negative" else "🟡"
-                model_used = info.get("_model","Gemini")
+                if info.get("_model"): model_used.add(info["_model"])
                 rows.append({
                     "Topic": topic,
                     "Timing": time_str,
@@ -411,7 +470,10 @@ def get_active_events(gemini_key: str, news_key: str) -> tuple[pd.DataFrame, str
                 rank = {"🔴 Critical":0,"🟠 High":1,"🟡 Moderate":2}
                 df['_s'] = df['Impact'].apply(lambda x: next((v for k,v in rank.items() if k in str(x)),99))
                 df = df.sort_values(['_s','Weight'],ascending=[True,False]).drop(columns=['_s']).reset_index(drop=True)
-                return df, f"Gemini AI ({model_used})"
+                models_str = ", ".join(m for m in model_used if m)
+                cached_count = len(titles) - uncached
+                label = f"Gemini AI ({models_str}) | {cached_count} cached + {uncached} new calls"
+                return df, label
 
     # Keyword fallback — always works, zero API calls
     results = keyword_fallback_analysis(raw_news)
